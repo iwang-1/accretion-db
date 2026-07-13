@@ -1,47 +1,136 @@
 name: CI
 
+# accretion-db's quality gate. Four parallel jobs mirror the four things this
+# repo promises: it is formatted (fmt), it is lint-clean under the strictest
+# setting (clippy -D warnings over every target), it is *correct and crash-safe*
+# (test — including the full deterministic crash sweep, the proptest schedules,
+# and a real SIGKILL smoke), and its benches still build and run (bench-smoke).
+#
+# Sizing note (2-core hosted runner): every job here is measured, not guessed.
+# The exhaustive crash sweep (N distinct crash points x 4 tear-mode seeds x 2
+# durable modes) runs IN FULL — it is the crown jewel and completes in ~3s even
+# single-threaded. Only the *randomized* proptest schedules are capped, via
+# PROPTEST_CASES below; the full-size randomized run and all benchmark numbers
+# are produced on the disclosed build host in stage S6, never asserted in CI.
+
 on:
   push:
     branches: [main]
   pull_request:
 
+# Cancel superseded runs on the same ref so a busy PR does not queue stale CI.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # Fail our own crate's build on any warning. Registry dependencies are built
+  # with `--cap-lints allow` by cargo, so this only polices accretion-db's code.
+  RUSTFLAGS: "-D warnings"
+  # Cap the *randomized* proptest schedules (tests/crash.rs `schedules`,
+  # tests/model.rs) for a 2-core runner. The committed fixed-seed regression
+  # corpus and the deterministic exhaustive sweep ignore this and always run in
+  # full. The host run (S6) uses the in-code case counts.
+  PROPTEST_CASES: "32"
 
 jobs:
-  check:
-    name: fmt + clippy + test
+  fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install stable toolchain
+      - name: Install toolchain (rustfmt)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: rustfmt (check only)
+          components: rustfmt
+      - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: clippy (deny warnings, all targets)
-        run: cargo clippy --all-targets -- -D warnings
+  clippy:
+    name: clippy (-D warnings, all targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Lint every target (lib, bins, tests, benches) with warnings denied.
+      - name: clippy (default features)
+        run: cargo clippy --locked --all-targets -- -D warnings
+      # The sled baseline shim compiles only under the `bench-sled` feature, so
+      # lint that path too — otherwise the comparison code could rot unnoticed.
+      - name: clippy (--features bench-sled)
+        run: cargo clippy --locked --all-targets --features bench-sled -- -D warnings
 
-      - name: test
-        run: cargo test --all-targets
+  test:
+    name: tests (crash sweep + proptest + kill smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
-      - name: doc tests
-        run: cargo test --doc
+      # Compile everything up front so a build error surfaces before any suite
+      # runs and so the per-suite timings below reflect execution, not build.
+      - name: Build all test targets
+        run: cargo test --locked --all-targets --no-run
 
-  # Later stages add: reduced-size crash sweep, fixed-seed proptest regressions,
-  # a process-kill smoke run, and a criterion --test bench smoke (asserting
-  # nothing about absolute numbers). They are omitted until the engine exists.
+      # Fast in-memory unit tests (lib modules + the bin crates' own tests).
+      - name: Unit tests (lib + bins)
+        run: cargo test --locked --lib --bins
+
+      # Component integration tests against SimFs and RealFs.
+      - name: Component integration tests
+        run: >
+          cargo test --locked
+          --test engine --test wal --test sstable --test simfs --test harness
+
+      # The whole engine vs a BTreeMap reference model (proptest, capped by
+      # PROPTEST_CASES for CI).
+      - name: Reference-model property tests
+        run: cargo test --locked --test model
+
+      # The heart of the repo: the deterministic exhaustive crash-point sweep
+      # (runs IN FULL), the randomized proptest crash schedules (capped by
+      # PROPTEST_CASES), and the committed fixed-seed regression corpus.
+      - name: Crash-consistency sweep + schedules + regressions
+        run: cargo test --locked --test crash -- --nocapture
+
+      # Process-kill smoke: spawn the RealFs child, SIGKILL it mid-load, reopen,
+      # and verify every acknowledged key survived. The larger repeated host run
+      # is recorded in RESULTS.md; this is the CI smoke count.
+      - name: Process-kill smoke (SIGKILL child, verify acked keys)
+        run: cargo test --locked --test process_kill -- --nocapture
+
+      # Documentation examples in the public API must stay runnable.
+      - name: Doc tests
+        run: cargo test --locked --doc
+
+  bench-smoke:
+    name: bench smoke (no numbers asserted)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Criterion in --test mode executes each benchmark exactly once and checks
+      # only that it runs — it measures and asserts NOTHING about latency. Real
+      # criterion numbers, if ever quoted, come from the S6 host run.
+      - name: Criterion micro-benches (smoke, --test)
+        run: cargo bench --locked --bench hot_paths -- --test
+
+      # Build and run the closed-loop throughput driver on a tiny workload to
+      # prove the bin and its engine path stay wired up. Its printed ops/s is a
+      # smoke value on a shared CI VM and is deliberately NOT a resume figure —
+      # the driver itself prints that disclaimer.
+      - name: Throughput driver smoke (accretion-bench)
+        run: cargo run --locked --release --bin accretion-bench -- fill-random --keys 500
