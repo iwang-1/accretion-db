@@ -24,5 +24,10 @@ tempfile = "3"
 [profile.release]
 debug = true
 
-# [[bin]] and [[bench]] targets are added in later stages (S5) as the
-# accretion-bench / accretion-crashtest binaries and criterion benches land.
+# The real-process kill harness child (S3), driven by tests/process_kill.rs:
+# the parent spawns it on RealFs and SIGKILLs it mid-load, then reopens and
+# verifies every acknowledged key survived. The accretion-bench throughput
+# driver and criterion benches land in S5.
+[[bin]]
+name = "accretion-crashtest"
+path = "src/bin/accretion-crashtest.rs"
