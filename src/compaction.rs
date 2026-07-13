@@ -171,11 +171,18 @@ where
     }))
 }
 
-/// Whether tier `t + 1` would be the bottom-most (oldest) populated tier after
-/// compacting tier `t` into it — i.e. no tier beyond `t + 1` holds any tables.
-/// Only then is dropping tombstones safe.
+/// Whether compacting tier `t` produces the globally-oldest data, so a tombstone
+/// has nothing older left to shadow and may be physically dropped.
+///
+/// This requires every tier *below* the inputs — the destination tier `t + 1`
+/// **and** everything beyond it — to be empty before the merge. A subtle case the
+/// property tests caught: the destination tier `t + 1` can already hold older
+/// tables from prior compactions, and those may contain a live value that a
+/// tombstone in tier `t` is meant to shadow. Dropping the tombstone then would
+/// resurrect the deleted key, so it is only safe when tier `t + 1` and below are
+/// all empty.
 fn output_is_bottom(version: &Version, t: usize) -> bool {
-    (t + 2..version.num_tiers()).all(|i| version.tier_len(i) == 0)
+    (t + 1..version.num_tiers()).all(|i| version.tier_len(i) == 0)
 }
 
 /// Run one compaction pass over the current version: for the youngest tier that

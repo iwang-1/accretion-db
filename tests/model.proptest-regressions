@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2108948e8eb8c4b3573034894f70727c29563e18fe2e1bb78a7572ae60b4cc12 # shrinks to ops = [Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([97], []), Put([98], []), Put([97], []), Put([99], []), Put([100], []), Put([97], []), Flush, Put([97], []), Put([98], []), Put([99], [44]), Put([98, 100], [32, 210, 234, 133]), Put([101, 97], [175, 107]), Delete([101, 98]), Put([97], [182, 28, 229]), Delete([98, 98, 101]), Delete([99, 99]), Flush, Delete([100]), Flush, Put([100, 98, 98], [229, 0, 164, 128, 110, 163, 193, 20]), Flush, Put([99, 97, 100], [53, 86, 90, 180, 180, 51, 2, 57]), Put([97, 97], [153, 24]), Delete([97, 101, 98]), Put([97], [226, 66, 119, 177, 15, 168, 58])], seed = 18216531957531445836
