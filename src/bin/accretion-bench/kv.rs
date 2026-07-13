@@ -23,8 +23,9 @@
 //!   `Db::flush` fsyncs all dirty IO buffers (its docs), i.e. it is sled's
 //!   durability barrier. Calling it after every `insert` gives sled the same
 //!   *ack-implies-fsync* contract accretion `Always` gives, so both pay one
-//!   fsync per write and both are bounded by the disk's ~2.79 ms fsync (see
-//!   DESIGN_NOTES). This is the apples-to-apples durable row.
+//!   fsync per write and both are bounded by the disk's fdatasync cost
+//!   (~878 µs p50 on the build host; see DESIGN_NOTES). This is the
+//!   apples-to-apples durable row.
 //!
 //! * **Buffered match — accretion `OsBuffered` vs sled default, flusher off.**
 //!   sled's `flush_every_ms` (default `Some(500)`) spawns a background thread

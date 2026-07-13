@@ -22,13 +22,17 @@ protocol necessary — see below.
 
 ## Group-commit math (stub — WAL stage)
 
-On a disk whose 4 KiB fsync costs ~2.79 ms (measured on the build host via
-`scripts/fsync_probe.rs`), per-write durability caps throughput at ~1/0.00279 ≈
-**350 writes/sec regardless of engine quality**. Group commit batches *N* queued
-writers into a single write+fsync, dividing the fsync cost across them:
-throughput scales toward *N* × 350 while single-write latency rises toward one
-batch interval. This throughput/latency tradeoff is why the headline resume
-number names the *mode* (`GroupCommit`), not just a raw figure.
+On a disk whose 4 KiB `fdatasync` costs ~878 µs p50 / ~975 µs p99 (measured on
+the build host via `scripts/fsync_probe.rs`; the heavier directory fsync that
+backs rename durability is ~1.97 ms), a *bare* per-write fdatasync caps
+throughput at ~1/0.000878 ≈ **1140 writes/sec regardless of engine quality**.
+The engine's own `Always` per-put is heavier — measured ~2.7 ms — because each
+durable put fsyncs the WAL *plus* amortized SSTable and manifest syncs, roughly
+3× a bare fdatasync. Group commit batches *N* queued writers into a single
+write+fsync, dividing the fsync cost across them: throughput scales toward
+*N* × the per-fsync ceiling while single-write latency rises toward one batch
+interval. This throughput/latency tradeoff is why the headline resume number
+names the *mode* (`GroupCommit`), not just a raw figure.
 `{MEASURE: Nx multiplier}` to be filled from `benchmarks/RESULTS.md`.
 
 ## Torn-tail truncation (stub — WAL stage)
