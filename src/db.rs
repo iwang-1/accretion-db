@@ -344,6 +344,13 @@ impl Db {
         Ok(())
     }
 
+    /// The current manifest [`Version`](crate::manifest::Version) — the live
+    /// table layout. Exposed for tests that assert a workload genuinely crossed
+    /// flush and compaction boundaries (tier structure).
+    pub fn debug_version(&self) -> Arc<crate::manifest::Version> {
+        self.manifest.current()
+    }
+
     /// Fetch (opening and caching if needed) the reader for table `meta`.
     fn reader_for(&self, meta: &TableMeta) -> Result<Arc<SsTableReader>> {
         if let Some(r) = self
