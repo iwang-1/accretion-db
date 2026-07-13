@@ -107,3 +107,52 @@ Out of scope by design: the engine leans on the OS page cache instead of a
 custom block cache (documented decision, revisited only if benchmarks demand
 it), and avoids io_uring/O_DIRECT to keep the code pure-Rust and portable. The
 point of the project is crash-consistency proof, not squeezing the I/O path.
+
+## Crash-consistency proof (built, S3)
+
+The recovery invariant, enforced everywhere: **zero acknowledged-write loss**.
+Every `put`/`delete` that *returned* under a durable mode (`Always` /
+`GroupCommit`) is present with its exact value after recovery; an in-flight op
+that never returned is either fully applied or fully absent; there are no phantom
+keys, no corruption, and `scan` agrees with `get`. Three independent layers prove
+it (`tests/crash.rs`, `tests/process_kill.rs`):
+
+1. **Exhaustive deterministic sweep.** A canonical mixed workload (puts,
+   overwrites, deletes over a colliding key set, sized against a 128-byte memtable
+   to force multiple flushes and at least one compaction) is run once to count
+   `N = 330` mutating storage ops. Then for every crash point `i in 1..=N`, across
+   four RNG seeds (which steer the tear mode — drop / torn-truncate / bit-flip on
+   the crashing op) and both durable modes, the engine is crashed after op `i`,
+   reopened, and verified against a model of the acknowledged prefix — 2 640 total
+   crash executions. This is the distinct-crash-point figure the résumé cites.
+
+2. **Property-based random schedules.** proptest generates random op sequences ×
+   random crash fraction × random durable mode and model-verifies after recovery,
+   shrinking any failure to a minimal counterexample. A fixed-seed regression
+   corpus (`mod regressions`) pins the highest-risk shapes — resurrection across a
+   flush, a tombstone shadowing a lower tier through a compaction, a delete-heavy
+   schedule — sweeping every crash point of each so CI re-runs them deterministically.
+
+3. **Real process kill.** `accretion-crashtest` writes to a real `RealFs` database
+   in `Always` mode and prints each key index only after its `put` returns durable;
+   the test `SIGKILL`s it mid-load (uncatchable, no unwinding, no destructors — a
+   true power-loss analogue), reopens on the real kernel, and confirms every acked
+   key survived. This exercises real `fsync`, real directory-entry durability, and
+   real torn-tail truncation, closing the gap between the simulator and hardware.
+
+**Why the SimFs `rename`-durability subtlety matters (BUGS_FOUND.md #2).** The
+manifest's atomic switch and the WAL's segment-truncate both `rename` a synced
+temp file *over an existing durable name*. Real POSIX guarantees that once the
+parent directory is `fsync`'d the destination durably resolves to the new inode,
+whether or not the name previously existed. SimFs originally refreshed a file's
+durable image only when it was not already durably present, so it under-modeled
+this case and reported false acknowledged-write loss on a correct engine. The fix
+stages the source's synced image on `rename` and commits it into the destination's
+durable bytes on the covering `sync_dir`; a crash before that `sync_dir` discards
+it. This is the fault-model boundary the whole proof rests on, so it is modeled
+exactly, not approximately.
+
+**Harness validation (positive control).** To show the sweep is not vacuously
+green, the `Always` fsync-before-ack was deliberately removed once: the sweep
+failed instantly at crash point 1 with acknowledged-write loss, then the fsync was
+restored. Documented in `BUGS_FOUND.md` as validation, never as a shipped bug.

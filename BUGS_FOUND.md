@@ -92,3 +92,26 @@ false-positive (the engine's manifest protocol was already correct); fixing it
 made SimFs model the exact POSIX rename-durability guarantee the manifest and WAL
 depend on, so the sweep now proves the engine against a faithful power-loss model
 rather than an overly-pessimistic one.
+
+## Harness validation (positive control)
+
+Bug #2 above was a false-*positive* (the harness reported loss the engine did not
+have). To also confirm the harness is not a false-*negative* — that it genuinely
+*catches* real acknowledged-write loss and is not vacuously green — a positive
+control was run at the close of S3:
+
+* **Sabotage:** in `Wal::commit_sync_now` (the `Durability::Always` path), the
+  `w.active.sync(&*self.fs)?` fsync-before-ack was deleted, so an `Always` `put`
+  returned before its WAL frame was durable.
+* **Result:** `tests/crash.rs::exhaustive::always_zero_acked_loss_at_every_crash_point`
+  failed *immediately* — at crash point 1, `acked=1`: `key00` had been
+  acknowledged yet was `None` after recovery. Exactly the acknowledged-write loss
+  the invariant forbids.
+* **Revert:** the fsync was restored (`git`-clean revert, verified by `git diff`),
+  and the sweep is green again.
+
+This is labelled *validation of the harness*, not a bug the engine ever shipped:
+the engine's code was never wrong here — the fsync was removed on purpose and put
+straight back. It demonstrates the sweep has real detection power, closing the
+loop on the two possible harness failure modes (false positive: bug #2, fixed;
+false negative: this control, disproven).
