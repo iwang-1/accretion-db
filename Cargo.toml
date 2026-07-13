@@ -14,20 +14,46 @@ categories = ["database-implementations"]
 crc32fast = "1"
 rand = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
+# The sled baseline is an OPTIONAL dependency, gated behind the `bench-sled`
+# feature and off by default, so it never enters a downstream embedder's
+# dependency tree. It is a normal (not dev) dependency because the KvBench
+# shim lives in the `accretion-bench` binary, and Cargo does not make
+# dev-dependencies available to `[[bin]]` targets. Enable with
+# `--features bench-sled` to build the sled comparison into the driver.
+sled = { version = "0.34", optional = true }
 
 [dev-dependencies]
 proptest = "1"
 criterion = "0.5"
-sled = "0.34"
 tempfile = "3"
+
+[features]
+# Compiles the sled baseline shim into the accretion-bench driver. Off by
+# default so `cargo build`/`cargo install` of the embeddable crate never pulls
+# sled. CI lints it explicitly via `clippy --all-targets --features bench-sled`.
+bench-sled = ["dep:sled"]
 
 [profile.release]
 debug = true
 
 # The real-process kill harness child (S3), driven by tests/process_kill.rs:
 # the parent spawns it on RealFs and SIGKILLs it mid-load, then reopens and
-# verifies every acknowledged key survived. The accretion-bench throughput
-# driver and criterion benches land in S5.
+# verifies every acknowledged key survived.
 [[bin]]
 name = "accretion-crashtest"
 path = "src/bin/accretion-crashtest.rs"
+
+# The closed-loop throughput/latency driver (S5): fill-random/fill-seq/
+# point-read/scan workloads across all three durability modes, speaking the
+# KvBench trait so accretion-db and (with --features bench-sled) sled run the
+# same code paths under the same histogram.
+[[bin]]
+name = "accretion-bench"
+path = "src/bin/accretion-bench/main.rs"
+
+# Criterion micro-benches for the hot paths (memtable, bloom, sstable block
+# read, WAL framing, merge iterator). Latency distributions for single ops;
+# the closed-loop bin is the throughput tool.
+[[bench]]
+name = "hot_paths"
+harness = false
