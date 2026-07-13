@@ -40,12 +40,37 @@ record is `sync_file`d, so any acked record precedes the torn tail and verifies
 cleanly. The toy store in `tests/harness.rs` already demonstrates this rule;
 the real WAL adopts it verbatim.
 
-## Bloom filter sizing (stub — SSTable stage)
+## Bloom filter sizing (built, S1c)
 
-Per-table bloom, own implementation, k hash functions via xxhash64 double
-hashing. FPR ≈ (1 − e^(−kn/m))^k, minimised at k = (m/n) ln 2. Target bits/key,
-chosen k, and the **measured vs theoretical FPR** get published here and in the
-README once the SSTable builder exists.
+Each SSTable carries its own bloom filter (`src/sstable/bloom.rs`), so a point
+read can skip a table's data blocks entirely on a confident "absent". The filter
+gives no false negatives, so skipping is always safe; it costs an occasional
+wasted block read on a false positive.
+
+**Sizing.** For `m` bits, `n` keys, `k` probes, the fraction of bits still `0`
+after all inserts is `≈ e^(−kn/m)`, so a lookup for an absent key reports present
+with probability `FPR ≈ (1 − e^(−kn/m))^k`. Holding `m/n` fixed, this is
+minimised at `k = (m/n) ln 2`, where `FPR ≈ 0.6185^(m/n)`. We size `m` from a
+caller-supplied **bits-per-key** (default `10`), round `m` up to a whole byte,
+and round `k` to the nearest integer of `(m/n) ln 2` (default `k = 7`). At 10
+bits/key the theoretical FPR is `0.6185^10 ≈ 0.0082` (~0.8%).
+
+**Why byte-aligned `m`, not a power of two.** A power-of-two `m` lets probes use
+a bit-mask instead of a modulo, but rounding an arbitrary bits-per-key budget up
+to the next power of two wastes up to ~2× memory (10 000 → 16 384 bits). For an
+in-memory per-table filter that overhead is not worth saving one `mod` per probe,
+so `m` is only byte-aligned.
+
+**Double hashing.** Rather than compute `k` independent hashes, we use the
+Kirsch–Mitzenmacher construction `g_i(x) = h1(x) + i·h2(x) (mod m)`, deriving
+`h1`/`h2` as the low/high 64-bit halves of one `xxh3_128` of the key. `h2` is
+reduced to a non-zero residue mod `m` so the step never degenerates to probing
+one bit `k` times. Same asymptotic FPR, one hash computation per key.
+
+**Measured vs theoretical.** `bloom::tests::measured_fpr_near_theoretical`
+inserts 10 000 keys and probes 100 000 disjoint keys, asserting the empirical FPR
+tracks the theoretical formula. The exact host-run measured figure is published
+in the README once the bench/measure stage runs.
 
 ## Size-tiered vs leveled compaction (stub — compaction stage)
 
