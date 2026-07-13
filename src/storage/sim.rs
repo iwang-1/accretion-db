@@ -95,6 +95,15 @@ struct FileState {
     present_live: bool,
     /// Whether the path exists in the durable namespace (survives a crash).
     present_durable: bool,
+    /// Content staged by a volatile [`rename`](Storage::rename) into this name:
+    /// the source inode's already-synced bytes that this name will durably
+    /// resolve to *once* a covering [`sync_dir`](Storage::sync_dir) commits the
+    /// rename. `None` unless a rename into this path is pending. A crash before
+    /// that `sync_dir` discards it (the rename reverts); the commit copies it into
+    /// [`durable`](FileState::durable). This is what makes the manifest's
+    /// tmp+sync+rename-over-`MANIFEST`+dir-sync atomic replace crash-correct even
+    /// when the destination already existed durably.
+    staged_durable: Option<Vec<u8>>,
 }
 
 /// The mutable interior of a [`SimFs`], guarded by a single [`Mutex`].
@@ -252,11 +261,12 @@ impl SimFs {
             fs.durable = kept;
         }
 
-        // Revert every file to its durable image: buffered data and volatile
-        // directory-entry changes are lost.
+        // Revert every file to its durable image: buffered data, volatile
+        // directory-entry changes, and any uncommitted staged rename are lost.
         for f in st.files.values_mut() {
             f.live = f.durable.clone();
             f.present_live = f.present_durable;
+            f.staged_durable = None;
         }
         // Files that never became durably present disappear entirely.
         st.files.retain(|_, f| f.present_durable);
@@ -381,8 +391,10 @@ impl Storage for SimFs {
                 .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
             // Promote every buffered byte to durable. The directory entry's
             // durability is a separate concern (`sync_dir`), so `present_durable`
-            // is intentionally not set here.
+            // is intentionally not set here. An explicit file sync makes these
+            // exact bytes durable, superseding any staged rename intent.
             f.durable = f.live.clone();
+            f.staged_durable = None;
         }
         // This file's tail is now durable, so it is no longer a tear target.
         if st.last_append.as_deref() == Some(path) {
@@ -399,17 +411,21 @@ impl Storage for SimFs {
                 continue;
             }
             if f.present_live {
-                // A newly-linked entry (create/rename target) adopts its current
-                // content as durable. The engine's contract is to `sync_file`
-                // before renaming, so `live` is the already-durable image; see
-                // the module docs for this modeled boundary.
-                if !f.present_durable {
+                // Commit any rename staged into this name: the destination now
+                // durably resolves to the source's synced content, even if this
+                // name already existed durably (an atomic overwrite). Otherwise a
+                // freshly-created entry adopts its current content as durable
+                // (the engine `sync_file`s file bytes before this `sync_dir`).
+                if let Some(staged) = f.staged_durable.take() {
+                    f.durable = staged;
+                } else if !f.present_durable {
                     f.durable = f.live.clone();
                 }
                 f.present_durable = true;
             } else {
                 // An unlink (delete/rename source) becomes durable.
                 f.present_durable = false;
+                f.staged_durable = None;
             }
         }
         // Drop entries that are now absent in both namespaces.
@@ -426,11 +442,21 @@ impl Storage for SimFs {
             .filter(|f| f.present_live)
             .ok_or_else(|| StorageError::NotFound(from.to_path_buf()))?;
         let bytes = src.live.clone();
+        // The content this rename will durably resolve to once committed is the
+        // source inode's *synced* image. The engine's contract is to `sync_file`
+        // the source before renaming (the manifest/WAL tmp+sync+rename protocol),
+        // so `src.durable` is that content; stage it for the destination.
+        let staged = src.durable.clone();
         // Link `to` at the source's current content; unlink `from`. Both changes
         // are volatile in the live namespace until a `sync_dir` on the parent.
+        // Crucially, staging the durable image means a `sync_dir` makes `to`
+        // durably resolve to the *new* bytes even when `to` already existed
+        // durably (an atomic overwrite), and a crash before that `sync_dir`
+        // reverts `to` to whatever it durably was.
         let dst = st.files.entry(to.to_path_buf()).or_default();
         dst.present_live = true;
         dst.live = bytes;
+        dst.staged_durable = Some(staged);
         st.files.get_mut(from).expect("source present").present_live = false;
         Self::bump(&mut st);
         Ok(())
@@ -572,6 +598,58 @@ mod tests {
         fs.append(&p, b"xyz").expect("append"); // op 3 -> triggers crash
         let report = fs.last_report().expect("armed crash produced a report");
         assert_eq!(report.ops_before_crash, 3);
+    }
+
+    /// An atomic replace over an *already-durable* file (the manifest's
+    /// tmp+sync_file+rename-over-`MANIFEST`+sync_dir protocol) must, after a crash
+    /// following the `sync_dir`, durably resolve to the NEW content — not revert
+    /// to the old durable image. This is the POSIX guarantee the manifest relies
+    /// on; SimFs once under-modeled it and the crash sweep exposed the resulting
+    /// false acknowledged-write loss (see `BUGS_FOUND.md`).
+    #[test]
+    fn rename_over_durable_file_commits_new_content_on_dir_sync() {
+        let fs = SimFs::with_seed(1);
+        let man = root().join("MANIFEST");
+        let tmp = root().join("MANIFEST.tmp");
+
+        // Install v1 durably.
+        fs.create(&man).expect("create v1");
+        fs.append(&man, b"VERSION-1").expect("append v1");
+        fs.sync_file(&man).expect("sync v1");
+        fs.sync_dir(&root()).expect("dir-sync v1");
+
+        // Atomically replace with v2 over the existing durable MANIFEST.
+        fs.create(&tmp).expect("create tmp");
+        fs.append(&tmp, b"VERSION-2222").expect("append v2");
+        fs.sync_file(&tmp).expect("sync tmp");
+        fs.rename(&tmp, &man).expect("rename over MANIFEST");
+        fs.sync_dir(&root()).expect("dir-sync v2");
+
+        // A crash after the committing dir-sync keeps the new content.
+        fs.crash();
+        assert_eq!(read_all(&fs, &man), b"VERSION-2222");
+    }
+
+    /// A rename-over-durable that crashes *before* the committing `sync_dir`
+    /// reverts the destination to its old durable content — the replace never
+    /// happened.
+    #[test]
+    fn rename_over_durable_reverts_if_crash_before_dir_sync() {
+        let fs = SimFs::with_seed(1);
+        let man = root().join("MANIFEST");
+        let tmp = root().join("MANIFEST.tmp");
+        fs.create(&man).expect("create v1");
+        fs.append(&man, b"VERSION-1").expect("append v1");
+        fs.sync_file(&man).expect("sync v1");
+        fs.sync_dir(&root()).expect("dir-sync v1");
+
+        fs.create(&tmp).expect("create tmp");
+        fs.append(&tmp, b"VERSION-2222").expect("append v2");
+        fs.sync_file(&tmp).expect("sync tmp");
+        fs.rename(&tmp, &man).expect("rename over MANIFEST");
+        // No committing sync_dir: crash now.
+        fs.crash();
+        assert_eq!(read_all(&fs, &man), b"VERSION-1");
     }
 
     /// A rename is volatile until the parent is `sync_dir`'d: a crash reverts to

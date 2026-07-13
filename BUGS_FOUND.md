@@ -51,3 +51,44 @@ predicates agreed. It takes a multi-round workload that fills tier 0, compacts
 into tier 1, then fills and compacts tier 0 *again* — with a delete of a key that
 already lives in tier 1 — for the predicates to diverge. Random op sequences
 found that shape immediately.
+
+### 2. SimFs under-modeled `rename` over an already-durable file → false acknowledged-write loss (S3)
+
+**Found by:** `tests/crash.rs::exhaustive::{always,group_commit}_zero_acked_loss_at_every_crash_point`
+— the exhaustive crash-point sweep over the full engine, on the very first run.
+At crash points from op 28 onward (seeds 1/7/42/1234, tear modes drop and
+bit-flip), `key00` — a value whose `put` had *fully acknowledged* under a durable
+mode — was **absent** after recovery. Reducing to a direct SimFs probe: install
+`MANIFEST=v1` durably (create+append+sync_file+sync_dir), then atomically replace
+it with `v2` (tmp+append+sync_file+rename-over-`MANIFEST`+sync_dir), then crash.
+The recovered `MANIFEST` was `v1`, not `v2`.
+
+**Root cause:** the fault is in the *harness*, not the engine. `SimFs::rename`
+linked the destination in the live namespace but recorded nothing about what the
+destination should durably resolve to. `sync_dir` then only refreshed a file's
+durable image when `!present_durable` — so a rename **over a name that already
+existed durably** (exactly the manifest's atomic overwrite of `MANIFEST`, and the
+WAL's segment-truncate rewrite) left the destination's `durable` bytes pointing at
+the *old* content. A crash after the committing `sync_dir` reverted `MANIFEST` to
+the previous version, silently dropping every table the newer version had
+installed — and with it, acknowledged writes. Real POSIX makes a `rename` durable
+once the parent directory is fsync'd regardless of whether the target previously
+existed, so this was SimFs modeling *less* durability than a real disk offers: a
+false positive that would have wrongly failed a *correct* engine.
+
+**Fix:** give `FileState` a `staged_durable: Option<Vec<u8>>` slot. `rename` stages
+the source inode's already-synced (`durable`) image into the destination; the
+committing `sync_dir` moves that staged image into the destination's `durable`
+bytes (superseding an existing durable image), while a crash before that
+`sync_dir` discards the staged content and the destination reverts to its old
+durable image. `sync_file` clears any staged intent (an explicit file sync makes
+the live bytes durable directly). `src/storage/sim.rs`, same commit as this entry;
+covered by the new `rename_over_durable_file_commits_new_content_on_dir_sync` and
+`rename_over_durable_reverts_if_crash_before_dir_sync` unit tests.
+
+**Honesty note:** this is a harness-fidelity bug, logged here because the crash
+sweep is the product and its fidelity *is* the deliverable. It was a
+false-positive (the engine's manifest protocol was already correct); fixing it
+made SimFs model the exact POSIX rename-durability guarantee the manifest and WAL
+depend on, so the sweep now proves the engine against a faithful power-loss model
+rather than an overly-pessimistic one.
