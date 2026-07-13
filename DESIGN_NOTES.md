@@ -33,7 +33,22 @@ write+fsync, dividing the fsync cost across them: throughput scales toward
 *N* × the per-fsync ceiling while single-write latency rises toward one batch
 interval. This throughput/latency tradeoff is why the headline resume number
 names the *mode* (`GroupCommit`), not just a raw figure.
-`{MEASURE: Nx multiplier}` to be filled from `benchmarks/RESULTS.md`.
+
+**Measured multiplier (build host, `benchmarks/RESULTS.md`).** In the
+WAL-commit-bound regime (a memtable large enough that the fill never crosses a
+flush, so the commit pipeline is what is measured), fill-random at 64 workers
+sustains a median **8,082 writes/sec** in `GroupCommit` versus **276 writes/sec**
+in `Always` at the same concurrency — a **~29× group-commit multiplier**, with
+single-write p50 latency rising from ~2.7 ms (`Always`) to ~7.4 ms
+(`GroupCommit`), exactly the throughput-for-latency trade the math predicts. The
+multiplier is bounded below the theoretical batch size because `Always` on this
+engine already pays ~3 fsyncs per put (WAL data sync, plus amortized manifest and
+directory syncs), so its per-write floor is ~2.7 ms, not the bare 878 µs
+`fdatasync`. Once the workload crosses flush + compaction boundaries, **synchronous
+compaction under the write lock** (see *Concurrency model*) becomes the dominant
+cost and collapses `GroupCommit` to ~623 writes/sec with multi-second stall
+outliers — the honest full-engine number, reported alongside the WAL-bound figure
+in RESULTS.md rather than hidden.
 
 ## Torn-tail truncation (stub — WAL stage)
 
