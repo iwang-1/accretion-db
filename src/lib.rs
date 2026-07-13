@@ -25,6 +25,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod iter;
+pub mod manifest;
 pub mod memtable;
 pub mod sstable;
 pub mod storage;
