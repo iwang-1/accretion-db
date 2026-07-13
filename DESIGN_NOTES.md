@@ -1,11 +1,21 @@
 # Design notes
 
-Rationale behind the non-obvious choices in `accretion-db`. This is a living
-document; sections are stubbed now and filled as each stage lands. The
-interview-facing goal is that every decision here can be defended from first
-principles.
+Rationale behind the non-obvious choices in `accretion-db`. The goal is that
+every decision here can be defended from first principles — this is the document
+to read before whiteboarding the engine.
 
-## The `Storage` seam (built, S0)
+**Contents:** [the `Storage` seam](#the-storage-seam) ·
+[write path & read path](#write-path-and-read-path) ·
+[group-commit math](#group-commit-math) ·
+[torn-tail truncation](#torn-tail-truncation) ·
+[bloom sizing](#bloom-filter-sizing) ·
+[size-tiered vs leveled](#size-tiered-vs-leveled-compaction) ·
+[manifest atomicity](#manifest-atomicity) ·
+[concurrency model](#concurrency-model) ·
+[why not mmap/io_uring](#why-not-mmap--io_uring--a-block-cache) ·
+[crash-consistency proof](#crash-consistency-proof).
+
+## The `Storage` seam
 
 The engine talks to disk through one object-safe trait, `Storage`, held as
 `Arc<dyn Storage>`. Two implementations — `RealFs` and `SimFs` — are
@@ -20,7 +30,48 @@ only. Survival across a crash is earned by `sync_file` (file bytes) and
 semantics and is exactly what makes the manifest's tmp+fsync+rename+dir-fsync
 protocol necessary — see below.
 
-## Group-commit math (stub — WAL stage)
+## Write path and read path
+
+**Write.** `Db::put`/`delete` funnels into one `write` method that runs in three
+phases so the db-level write mutex is held only long enough to *order* the write,
+not across the durable wait (this phasing is the fix for BUGS_FOUND #4):
+
+1. *Locked:* claim the next monotonic sequence number and mark the write
+   in-flight. Ordering seq under the lock is what keeps the log's logical order
+   total even though the durable acks below can complete out of order.
+2. *Unlocked:* encode the record (`[seq u64][tag u8][klen u32][key]([vlen u32][value])`,
+   see FORMAT.md) and call `wal.append`. This is exactly where concurrent
+   `GroupCommit` writers meet and share one leader `fsync`; because the db mutex
+   is released, a second writer can enqueue into the same batch.
+3. *Re-locked:* apply to the active memtable via `insert_if_newer` (seq-guarded,
+   so an older ack landing late cannot clobber a newer value), clear the in-flight
+   mark, and — if the memtable crossed its size threshold — freeze it and run the
+   synchronous flush/compaction.
+
+The `put` returns only after the WAL commit contract for the configured mode is
+met, so *return implies durable* in `Always`/`GroupCommit`. Freeze is atomic: the
+active memtable is swapped for a fresh one and pushed (as an `Arc`) onto a frozen
+list; a flush drains a frozen memtable into a new tier-0 SSTable, bumps the
+manifest version, then releases the covered WAL segments. A flush cannot race a
+still-in-flight write: `flush_locked` gates new writers and waits on a `Condvar`
+for `in_flight == 0` before `wal.reset()`, so no acked write is dropped from the
+log before it reaches the memtable.
+
+**Read.** `Db::get` checks, newest state first: the active memtable, then each
+frozen memtable, then SSTables newest-first (youngest tier first, and within a
+tier the highest file id first — `Version::tables_newest_first`). The first hit
+wins, because newer state shadows older; a tombstone hit returns `None`
+immediately (an acked delete must hide any older value below it). Per table the
+probe order is: skip if the sought key is outside the table's `[first_key,
+last_key]` range; else consult the in-memory **bloom filter** and skip on a
+confident absent (no false negatives, so skipping is always safe); else binary-
+search the **sparse index** (first key per block) to the one 4 KiB block that
+could hold the key, read and CRC-check that block, and scan it. A `scan(range)`
+is the same set of sources fed into a k-way **merge iterator** (`src/iter/`) that
+yields keys in order, newest-wins per key, dropping tombstoned keys — verified
+against a `BTreeMap` reference model.
+
+## Group-commit math
 
 On a disk whose 4 KiB `fdatasync` costs ~878 µs p50 / ~975 µs p99 (measured on
 the build host via `scripts/fsync_probe.rs`; the heavier directory fsync that
@@ -50,7 +101,7 @@ cost and collapses `GroupCommit` to ~623 writes/sec with multi-second stall
 outliers — the honest full-engine number, reported alongside the WAL-bound figure
 in RESULTS.md rather than hidden.
 
-## Torn-tail truncation (stub — WAL stage)
+## Torn-tail truncation
 
 The WAL is a sequence of length-prefixed, CRC32-framed records. Recovery scans
 frames and **truncates at the first frame that is short or fails its CRC**. This
@@ -59,7 +110,7 @@ record is `sync_file`d, so any acked record precedes the torn tail and verifies
 cleanly. The toy store in `tests/harness.rs` already demonstrates this rule;
 the real WAL adopts it verbatim.
 
-## Bloom filter sizing (built, S1c)
+## Bloom filter sizing
 
 Each SSTable carries its own bloom filter (`src/sstable/bloom.rs`), so a point
 read can skip a table's data blocks entirely on a confident "absent". The filter
@@ -88,10 +139,11 @@ one bit `k` times. Same asymptotic FPR, one hash computation per key.
 
 **Measured vs theoretical.** `bloom::tests::measured_fpr_near_theoretical`
 inserts 10 000 keys and probes 100 000 disjoint keys, asserting the empirical FPR
-tracks the theoretical formula. The exact host-run measured figure is published
-in the README once the bench/measure stage runs.
+tracks the theoretical formula. On the build host the measured FPR is **0.77 %**
+against the **0.82 %** theoretical (10 bits/key, k=7) — just under, as expected
+for a well-mixed double-hashing filter (RESULTS.md §4).
 
-## Size-tiered vs leveled compaction (stub — compaction stage)
+## Size-tiered vs leveled compaction
 
 Size-tiered chosen deliberately: **lower write amplification and simpler
 invariants**, at the cost of higher space and read amplification. Tier *t*
@@ -101,7 +153,7 @@ live data in a lower tier, so dropping it early would resurrect deleted keys.
 Leveled compaction buys RocksDB tighter read/space amp at higher write amp; out
 of scope here.
 
-## Manifest atomicity (stub — manifest stage)
+## Manifest atomicity
 
 A version switch writes a new manifest file, `sync_file`s it, atomically
 `rename`s it into place, then `sync_dir`s the parent. Without the final
@@ -111,7 +163,7 @@ reader could load a manifest that references files that were meant to be
 obsoleted (or miss files that were meant to be installed). Readers pin an
 `Arc<Version>` and never observe a half-installed version.
 
-## Concurrency model (stub — engine stage)
+## Concurrency model
 
 A deliberate simplicity choice: a single logical writer (mutex on the write
 path), readers via an `RwLock` memtable snapshot plus a pinned `Arc<Version>`.
@@ -136,14 +188,14 @@ synchronous design costs write-path latency spikes when a large tier compacts,
 but buys a correctness story that is simple to prove and audit, which is the
 point of this project.
 
-## Why not mmap / io_uring / a block cache (stub)
+## Why not mmap / io_uring / a block cache
 
 Out of scope by design: the engine leans on the OS page cache instead of a
 custom block cache (documented decision, revisited only if benchmarks demand
 it), and avoids io_uring/O_DIRECT to keep the code pure-Rust and portable. The
 point of the project is crash-consistency proof, not squeezing the I/O path.
 
-## Crash-consistency proof (built, S3)
+## Crash-consistency proof
 
 The recovery invariant, enforced everywhere: **zero acknowledged-write loss**.
 Every `put`/`delete` that *returned* under a durable mode (`Always` /
