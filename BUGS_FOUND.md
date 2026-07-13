@@ -138,6 +138,15 @@ real concurrency exposes that the layer above the WAL was serializing writers
 before they could batch — a genuine integration-level bug the closed-loop
 benchmark surfaced.
 
+**Crash-consistency re-proof (post-fix, S5.5c):** because the fix restructured the
+write path's locking — exactly what the crash proof depends on — the full crash
+suite was re-run against the new `claim → log (unlocked) → apply` phasing. All
+green, zero acknowledged-write loss, no regression introduced:
+`crash::exhaustive` 4/4 (330 distinct crash points × 4 seeds × 2 durable modes =
+2640 crash executions), `crash::schedules::random_schedule_zero_acked_loss` (160
+proptest cases), and `process_kill` 2/2 (131 acked keys survived a mid-load
+SIGKILL; 82 keys survived 3 repeated SIGKILL/recover rounds).
+
 ## Harness validation (positive control)
 
 Bug #2 above was a false-*positive* (the harness reported loss the engine did not
