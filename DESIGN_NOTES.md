@@ -95,11 +95,27 @@ obsoleted (or miss files that were meant to be installed). Readers pin an
 ## Concurrency model (stub — engine stage)
 
 A deliberate simplicity choice: a single logical writer (mutex on the write
-path), readers via an `RwLock` memtable snapshot plus a pinned `Arc<Version>`,
-and — after the crash suite is green — exactly one background thread for
-flush/compaction, joined on `Drop`. Readers pinned to an old `Arc<Version>` stay
-correct while compaction replaces files underneath them, because a file is only
-deleted once no `Version` references it.
+path), readers via an `RwLock` memtable snapshot plus a pinned `Arc<Version>`.
+Readers pinned to an old `Arc<Version>` stay correct while compaction replaces
+files underneath them, because a file is only deleted once no `Version`
+references it.
+
+**Compaction runs synchronously by design in this version.** Both the flush
+path and each compaction pass derive their output table id from
+`next_table_id` on the version snapshot they started from and then call
+`Manifest::install`, which unconditionally swaps in the new version. Under a
+single logical writer this is race-free and keeps the crash-consistency proof
+tractable: every durable state transition is totally ordered, so the exhaustive
+crash sweep and proptest schedules reason about one linear history of manifest
+installs. Moving compaction onto a background thread would let two producers
+pick the same `next_table_id` (colliding output files) and let a compaction
+`install` clobber a concurrently flushed tier-0 table (acked-write loss) — i.e.
+it demands turning `install` into a transactional compare-and-apply and then
+re-establishing the crash invariant against interleaved installs. That rework is
+deliberately deferred: **background/concurrent compaction is future work.** The
+synchronous design costs write-path latency spikes when a large tier compacts,
+but buys a correctness story that is simple to prove and audit, which is the
+point of this project.
 
 ## Why not mmap / io_uring / a block cache (stub)
 
