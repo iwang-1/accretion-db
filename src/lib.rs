@@ -25,5 +25,6 @@
 #![warn(missing_debug_implementations)]
 
 pub mod storage;
+pub mod testkit;
 
 pub use storage::{RealFs, SimFs, Storage, StorageError, StorageResult};
