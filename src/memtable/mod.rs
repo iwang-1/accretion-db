@@ -157,6 +157,28 @@ impl Memtable {
         self.map.insert(key, val);
     }
 
+    /// Insert `key` only if `val` is at least as new as any value already present
+    /// (by [`InternalValue::seq`]); a stale write is dropped.
+    ///
+    /// Unlike [`insert`](Self::insert), this makes no monotonicity assumption
+    /// about the caller: concurrent writers on the engine's write path claim seqs
+    /// under a short lock but may complete their durable ack (and hence reach this
+    /// insert) out of seq order, and WAL recovery replays in segment order rather
+    /// than seq order. Resolving by seq here keeps the newest value per key
+    /// regardless of arrival order.
+    pub fn insert_if_newer(&mut self, key: Vec<u8>, val: InternalValue) {
+        let incoming = key.len() + val.payload_bytes() + ENTRY_OVERHEAD;
+        match self.map.get(&key) {
+            Some(prev) if prev.seq >= val.seq => return,
+            Some(prev) => {
+                let outgoing = key.len() + prev.payload_bytes() + ENTRY_OVERHEAD;
+                self.approx_bytes = self.approx_bytes - outgoing + incoming;
+            }
+            None => self.approx_bytes += incoming,
+        }
+        self.map.insert(key, val);
+    }
+
     /// Look up `key` in this table only.
     pub fn get(&self, key: &[u8]) -> Option<&InternalValue> {
         self.map.get(key)
@@ -246,6 +268,14 @@ impl MemtableSet {
     pub fn insert(&self, key: Vec<u8>, val: InternalValue) {
         let mut st = self.state.write().expect("memtable lock poisoned");
         st.active.insert(key, val);
+    }
+
+    /// Insert `key` into the active table only if `val` is newer (by seq) than the
+    /// value currently there — the concurrency-safe write-path insert. See
+    /// [`Memtable::insert_if_newer`] for why arrival order cannot be assumed.
+    pub fn insert_if_newer(&self, key: Vec<u8>, val: InternalValue) {
+        let mut st = self.state.write().expect("memtable lock poisoned");
+        st.active.insert_if_newer(key, val);
     }
 
     /// Resolve `key` to its newest version across active + frozen tables, or

@@ -93,6 +93,51 @@ made SimFs model the exact POSIX rename-durability guarantee the manifest and WA
 depend on, so the sweep now proves the engine against a faithful power-loss model
 rather than an overly-pessimistic one.
 
+### 4. Group commit degenerated to per-write fsync — the write lock was held across the append (S5.5)
+
+**Found by:** the benchmark calibration itself (the throughput harness). At every
+concurrency the `Durability::GroupCommit` fill matched `Durability::Always`
+(~369 ops/s at c=64) instead of beating it — the headline mode delivered no
+batching win. The group-commit design was demonstrably correct in isolation:
+`wal::tests::group_commit_concurrent_writers_all_durable` passed, proving the WAL
+leader/follower batching works when writers reach `append` concurrently.
+
+**Root cause:** `Db::write` held the db-level `write` mutex across
+`self.wal.append(&record)`. In `GroupCommit`, `append` enqueues the frame and
+then *parks* on the leader's shared fsync (`wal/mod.rs::commit_group`). Because
+the db mutex was still held during that park, no second writer could ever reach
+`append` to enqueue into the same batch — so every batch contained exactly one
+frame and group commit collapsed into one fsync per write, identical to
+`Always`. The bug was in the *engine's* write-path locking, not the WAL: the WAL
+could batch, but the layer above it serialized the writers before they got there.
+
+**Fix:** restructure `Db::write` into three phases so the db mutex is held only to
+order the write, not across the durable wait. Phase 1 (locked) claims the
+monotonic seq and marks the write in flight; phase 2 (unlocked) runs
+`wal.append`, which is exactly where concurrent `GroupCommit` writers now enqueue
+and share one leader fsync; phase 3 (re-locked) applies to the memtable and
+clears the in-flight mark. Two invariants are preserved explicitly: (a) seq is
+still totally ordered because it is claimed under the lock, and concurrent appends
+that ack out of seq order can no longer clobber a newer value because the memtable
+insert became seq-guarded (`MemtableSet::insert_if_newer`); (b) a flush cannot
+race a still-in-flight (acked-but-not-yet-applied) write — `flush_locked` sets a
+`flush_pending` gate that blocks new writers and waits on a `Condvar` for
+`in_flight == 0` before `wal.reset()`, so no acked write is ever dropped from the
+log before it lands in the memtable. `src/db.rs` + `src/memtable/mod.rs`, same
+commit as this entry.
+
+**Measured effect (build host, 10k-key fill-random, c=64):** GroupCommit rose from
+~369 ops/s to ~9.0k ops/s while Always stayed at ~367 ops/s — a ~24x group-commit
+speedup where before there was none. (Absolute numbers are build-host calibration
+figures, not the disclosed S6 resume matrix.)
+
+**Why the harness caught it and unit tests had not:** the WAL unit test drives
+`append` directly from many threads, so it observes the batching the WAL is
+capable of. Only an end-to-end throughput run *through the engine's write path* at
+real concurrency exposes that the layer above the WAL was serializing writers
+before they could batch — a genuine integration-level bug the closed-loop
+benchmark surfaced.
+
 ## Harness validation (positive control)
 
 Bug #2 above was a false-*positive* (the harness reported loss the engine did not

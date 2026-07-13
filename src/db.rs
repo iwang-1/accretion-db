@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::ops::{Bound, RangeBounds};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use crate::compaction::{self, CompactionError};
 use crate::iter::{EntrySource, LiveIter, MergeIterator};
@@ -118,11 +118,28 @@ impl From<CompactionError> for DbError {
 /// Result alias for engine operations.
 pub type Result<T> = std::result::Result<T, DbError>;
 
-/// Write-path state guarded by the single-writer mutex: the next sequence number
-/// to hand out. Kept behind its own lock so reads never contend with it.
+/// Write-path state guarded by the single-writer mutex. Kept behind its own lock
+/// so reads never contend with it.
+///
+/// The write path releases this lock across the (potentially group-batched) WAL
+/// append so concurrent writers can enqueue and share one `fsync`. To keep that
+/// safe, the lock guards two coupled fields:
+///
+/// * `next_seq` — the monotonic sequence clock; each writer claims its seq under
+///   the lock so ordering is total even though appends complete concurrently.
+/// * `in_flight` — writers that have claimed a seq but not yet observed their
+///   durable ack and applied to the memtable. A flush must not run while any
+///   write is in flight, because [`Db::flush_locked`] resets the WAL and a
+///   still-in-flight record (already acked to its caller, not yet in the
+///   memtable) would be lost. `flush` therefore waits for `in_flight == 0`.
+/// * `flush_pending` — set while a flush is waiting to run or running. New
+///   writers block in phase 1 until it clears, so `in_flight` can actually drain
+///   to zero (otherwise sustained writes would starve the flush).
 #[derive(Debug)]
 struct WriteState {
     next_seq: Seq,
+    in_flight: usize,
+    flush_pending: bool,
 }
 
 /// An embeddable LSM-tree key/value store.
@@ -140,6 +157,9 @@ pub struct Db {
     /// Immutable-per-id SSTable reader cache (a file id is never reused).
     readers: RwLock<HashMap<u64, Arc<SsTableReader>>>,
     write: Mutex<WriteState>,
+    /// Signaled whenever a write decrements `in_flight`; a flush waiting for the
+    /// write path to quiesce (`in_flight == 0`) re-checks on each wake.
+    quiesced: Condvar,
 }
 
 impl Db {
@@ -197,7 +217,12 @@ impl Db {
             memtables,
             manifest,
             readers: RwLock::new(HashMap::new()),
-            write: Mutex::new(WriteState { next_seq }),
+            write: Mutex::new(WriteState {
+                next_seq,
+                in_flight: 0,
+                flush_pending: false,
+            }),
+            quiesced: Condvar::new(),
         })
     }
 
@@ -214,23 +239,60 @@ impl Db {
     }
 
     /// The shared write path for `put` and `delete`.
+    ///
+    /// Three phases keep the db-level `write` lock held only long enough to order
+    /// the write, so concurrent [`Durability::GroupCommit`] writers batch into one
+    /// `fsync` instead of serializing behind each other's park:
+    ///
+    /// 1. **Claim (locked).** Wait out any pending flush, take the next monotonic
+    ///    seq, mark the write in flight, then *release* the lock.
+    /// 2. **Log (unlocked).** Append to the WAL. In `GroupCommit` this is where a
+    ///    writer enqueues and parks on the leader's shared fsync; releasing the
+    ///    lock first is exactly what lets other writers reach this point and join
+    ///    the same batch. Returns only once the mode's durability contract is met.
+    /// 3. **Apply (locked).** Re-take the lock, insert into the memtable *by seq*
+    ///    (concurrent appends may ack out of seq order, so a stale write must not
+    ///    clobber a newer one — see [`MemtableSet::insert_if_newer`]), clear the
+    ///    in-flight mark, then flush if full.
+    ///
+    /// A concurrent reader can never observe an unacked or out-of-order value: the
+    /// memtable insert happens only after the durable ack (phase 3) and drops any
+    /// value older than what is already present for the key.
     fn write(&self, key: &[u8], kind: ValueKind) -> Result<()> {
-        let mut ws = self.write.lock().expect("db write lock poisoned");
-        let seq = ws.next_seq;
+        // Phase 1: claim a seq under the lock, then release it before the append.
+        let seq = {
+            let mut ws = self.write.lock().expect("db write lock poisoned");
+            while ws.flush_pending {
+                ws = self
+                    .quiesced
+                    .wait(ws)
+                    .expect("db write lock poisoned during flush wait");
+            }
+            let seq = ws.next_seq;
+            ws.next_seq = seq + 1;
+            ws.in_flight += 1;
+            seq
+        };
 
-        // 1. Durably log the record first (the WAL enforces the mode's contract).
+        // Phase 2: durably log the record with the lock released. On error, undo
+        // the in-flight mark so a waiting flush can still make progress.
         let record = encode_record(seq, key, &kind);
-        self.wal.append(&record)?;
+        if let Err(e) = self.wal.append(&record) {
+            let mut ws = self.write.lock().expect("db write lock poisoned");
+            ws.in_flight -= 1;
+            self.quiesced.notify_all();
+            return Err(e.into());
+        }
 
-        // 2. Apply to the active memtable and advance the sequence clock.
+        // Phase 3: the record is durable — apply to the memtable and re-take the
+        // lock to clear the in-flight mark and possibly flush.
         self.memtables
-            .insert(key.to_vec(), InternalValue { seq, kind });
-        ws.next_seq = seq + 1;
-
-        // 3. Flush if the memtable is now full, then cascade compaction. Both run
-        //    synchronously under the write lock in this stage.
+            .insert_if_newer(key.to_vec(), InternalValue { seq, kind });
+        let mut ws = self.write.lock().expect("db write lock poisoned");
+        ws.in_flight -= 1;
+        self.quiesced.notify_all();
         if self.memtables.is_full() {
-            self.flush_locked(&mut ws)?;
+            self.flush_locked(ws)?;
         }
         Ok(())
     }
@@ -296,14 +358,38 @@ impl Db {
     /// Force the active memtable to freeze and flush to a tier-0 SSTable, then
     /// cascade compaction. A no-op if there is nothing buffered.
     pub fn flush(&self) -> Result<()> {
-        let mut ws = self.write.lock().expect("db write lock poisoned");
-        self.flush_locked(&mut ws)
+        let ws = self.write.lock().expect("db write lock poisoned");
+        self.flush_locked(ws)
     }
 
     /// Freeze the active memtable (if non-empty), flush every frozen table to a
     /// new tier-0 SSTable under the manifest protocol, release the WAL, then run
-    /// cascading compaction. Caller holds the write lock.
-    fn flush_locked(&self, ws: &mut WriteState) -> Result<()> {
+    /// cascading compaction. Consumes the write-lock guard.
+    ///
+    /// Because the write path releases the lock across its WAL append, a flush
+    /// must first quiesce it: set `flush_pending` (which blocks new writers in the
+    /// claim phase) and wait for `in_flight` to reach zero, so every already-acked
+    /// write has landed in the memtable before [`Wal::reset`] discards the log.
+    /// The pending flag is always cleared on the way out, even on error, so a
+    /// failed flush never wedges the write path.
+    fn flush_locked(&self, mut ws: std::sync::MutexGuard<'_, WriteState>) -> Result<()> {
+        ws.flush_pending = true;
+        while ws.in_flight > 0 {
+            ws = self
+                .quiesced
+                .wait(ws)
+                .expect("db write lock poisoned during quiesce wait");
+        }
+        let result = self.flush_quiesced(&ws);
+        ws.flush_pending = false;
+        self.quiesced.notify_all();
+        result
+    }
+
+    /// The flush body, run only once the write path has quiesced (`in_flight ==
+    /// 0`) with `flush_pending` set so no new writer can slip in. Caller holds the
+    /// write lock and owns clearing `flush_pending`.
+    fn flush_quiesced(&self, ws: &WriteState) -> Result<()> {
         // Freeze whatever is buffered so the active table is empty while we flush.
         if self.memtables.active_bytes() > 0 {
             self.memtables.freeze();
