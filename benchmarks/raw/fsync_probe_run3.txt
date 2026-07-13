@@ -1,0 +1,10 @@
+fsync_probe: 2000 iterations, 4 KiB blocks
+  dir: /tmp
+
+operation                               p50        p99        min        max       mean
+--------------------------------------------------------------------------------------
+sync_data (fdatasync, 4 KiB)        880.4µs    974.9µs    770.6µs    1.181ms    879.2µs
+sync_all  (fsync, 4 KiB)            890.9µs    2.803ms    787.4µs    3.803ms    1.272ms
+dir fsync (rename durability)       1.969ms    2.101ms    1.803ms    2.412ms    1.973ms
+
+Headline for RESULTS.md: 4 KiB fsync p50 = 880.4µs, p99 = 974.9µs (sync_data). Per-write durability ceiling ≈ 1135 ops/s.
