@@ -1,0 +1,28 @@
+[package]
+name = "accretion-db"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Embeddable LSM-tree storage engine in Rust, crash consistency proven by simulated-power-loss fault injection."
+authors = ["Ivan Wang <59074138+iwang-1@users.noreply.github.com>"]
+readme = "README.md"
+repository = "https://github.com/iwang-1/accretion-db"
+keywords = ["lsm", "storage-engine", "database", "wal", "crash-consistency"]
+categories = ["database-implementations"]
+
+[dependencies]
+crc32fast = "1"
+rand = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh3", "xxh64"] }
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
+sled = "0.34"
+tempfile = "3"
+
+[profile.release]
+debug = true
+
+# [[bin]] and [[bench]] targets are added in later stages (S5) as the
+# accretion-bench / accretion-crashtest binaries and criterion benches land.
