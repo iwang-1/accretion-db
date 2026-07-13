@@ -24,6 +24,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod iter;
+pub mod memtable;
 pub mod storage;
 pub mod testkit;
 
