@@ -180,6 +180,40 @@ impl Wal {
         self.writer.lock().expect("wal writer poisoned").active.id()
     }
 
+    /// Release the entire log: delete every segment and start a fresh, empty one.
+    ///
+    /// Called after a flush has durably captured every buffered record in an
+    /// SSTable, so the records those segments hold are no longer needed for
+    /// recovery ("segment release" in the data-flow doc). The new segment is
+    /// created at `max_existing_id + 1` and its directory entry made durable, so
+    /// a crash immediately afterwards recovers an empty log rather than replaying
+    /// already-flushed data.
+    ///
+    /// Crash-safety note: the new empty segment is created and `sync_dir`d
+    /// *before* the old segments are deleted, and the fresh id never collides with
+    /// a deleted one. A crash between the two steps leaves stale segments that a
+    /// subsequent recovery would replay — harmless, because their records are
+    /// already in an SSTable and de-duplicate by sequence number on read. This is
+    /// noted for the S3 crash sweep.
+    pub fn reset(&self) -> StorageResult<()> {
+        let mut w = self.writer.lock().expect("wal writer poisoned");
+        let existing = segment::list_segments(&*self.fs, &self.dir)?;
+        let next_id = existing.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
+
+        // Create the replacement first and make its directory entry durable.
+        let fresh = Segment::create(&*self.fs, &self.dir, next_id)?;
+        self.fs.sync_dir(&self.dir)?;
+
+        // Now retire the old segments (including the previously-active one).
+        for (_, path) in &existing {
+            self.fs.delete(path)?;
+        }
+        self.fs.sync_dir(&self.dir)?;
+
+        w.active = fresh;
+        Ok(())
+    }
+
     /// Append one record `payload` and return only once the configured
     /// [`Durability`] contract is met.
     ///
