@@ -24,6 +24,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
+pub mod compaction;
 pub mod iter;
 pub mod manifest;
 pub mod memtable;
