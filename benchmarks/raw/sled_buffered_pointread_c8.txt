@@ -1,0 +1,25 @@
+## run 1  ARGS: point-read --engine sled --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Sled durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_sled___durability_osbuffered___keys_50000___reads_50000___concurrency_8__1
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/buffered(no-flush)      c=8   ops=50000        0.11s     457512 ops/s  min=    1.3us mean=    16.1us p50=     6.1us p99=    91.9us max=   2597.7us
+point-read   sled/buffered(no-flush)      c=8   ops=50000        0.01s    3898877 ops/s  min=    0.5us mean=     1.7us p50=     1.3us p99=     5.1us max=    221.4us
+## run 2  ARGS: point-read --engine sled --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Sled durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_sled___durability_osbuffered___keys_50000___reads_50000___concurrency_8__2
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/buffered(no-flush)      c=8   ops=50000        0.11s     472246 ops/s  min=    1.2us mean=    15.7us p50=     6.2us p99=    91.6us max=   1743.8us
+point-read   sled/buffered(no-flush)      c=8   ops=50000        0.01s    4200946 ops/s  min=    0.5us mean=     1.6us p50=     1.3us p99=     4.5us max=    145.7us
+## run 3  ARGS: point-read --engine sled --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Sled durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_sled___durability_osbuffered___keys_50000___reads_50000___concurrency_8__3
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/buffered(no-flush)      c=8   ops=50000        0.11s     458511 ops/s  min=    1.2us mean=    15.8us p50=     6.0us p99=    88.8us max=   1894.0us
+point-read   sled/buffered(no-flush)      c=8   ops=50000        0.01s    3645538 ops/s  min=    0.4us mean=     1.8us p50=     1.4us p99=     4.8us max=    245.7us
+## run 4  ARGS: point-read --engine sled --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Sled durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_sled___durability_osbuffered___keys_50000___reads_50000___concurrency_8__4
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/buffered(no-flush)      c=8   ops=50000        0.11s     470437 ops/s  min=    1.3us mean=    16.0us p50=     5.9us p99=    92.1us max=   2039.7us
+point-read   sled/buffered(no-flush)      c=8   ops=50000        0.01s    3629414 ops/s  min=    0.4us mean=     1.7us p50=     1.3us p99=     4.8us max=    356.5us
+## run 5  ARGS: point-read --engine sled --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Sled durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_sled___durability_osbuffered___keys_50000___reads_50000___concurrency_8__5
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/buffered(no-flush)      c=8   ops=50000        0.10s     476498 ops/s  min=    1.6us mean=    15.9us p50=     5.8us p99=    93.1us max=   1807.7us
+point-read   sled/buffered(no-flush)      c=8   ops=50000        0.01s    3686026 ops/s  min=    0.5us mean=     1.8us p50=     1.4us p99=     7.9us max=    769.8us

@@ -1,0 +1,25 @@
+## run 1  ARGS: point-read --engine accretion --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Accretion durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_accretion___durability_osbuffered___keys_50000___reads_50000___concurrency_8__1
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=8   ops=50000        0.95s      52835 ops/s  min=    7.7us mean=   121.4us p50=    13.5us p99=   433.0us max= 561335.8us
+point-read   accretion-db/OsBuffered      c=8   ops=50000        0.08s     618141 ops/s  min=    8.1us mean=    12.3us p50=    11.8us p99=    22.2us max=    255.4us
+## run 2  ARGS: point-read --engine accretion --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Accretion durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_accretion___durability_osbuffered___keys_50000___reads_50000___concurrency_8__2
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=8   ops=50000        0.94s      53186 ops/s  min=    7.7us mean=   120.7us p50=    14.5us p99=   517.9us max= 575971.4us
+point-read   accretion-db/OsBuffered      c=8   ops=50000        0.08s     616043 ops/s  min=    7.1us mean=    12.1us p50=    11.7us p99=    19.5us max=    265.9us
+## run 3  ARGS: point-read --engine accretion --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Accretion durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_accretion___durability_osbuffered___keys_50000___reads_50000___concurrency_8__3
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=8   ops=50000        0.89s      56160 ops/s  min=    7.6us mean=   109.7us p50=    13.0us p99=   649.4us max= 448718.4us
+point-read   accretion-db/OsBuffered      c=8   ops=50000        0.08s     615188 ops/s  min=    8.0us mean=    11.9us p50=    11.4us p99=    18.9us max=    217.2us
+## run 4  ARGS: point-read --engine accretion --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Accretion durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_accretion___durability_osbuffered___keys_50000___reads_50000___concurrency_8__4
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=8   ops=50000        0.94s      53290 ops/s  min=    7.6us mean=   120.9us p50=    13.2us p99=   634.2us max= 506079.3us
+point-read   accretion-db/OsBuffered      c=8   ops=50000        0.08s     610633 ops/s  min=    7.7us mean=    12.3us p50=    11.7us p99=    21.7us max=    300.7us
+## run 5  ARGS: point-read --engine accretion --durability osbuffered --keys 50000 --reads 50000 --concurrency 8
+# accretion-bench engine=Accretion durability=OsBuffered keys=50000 reads=50000 concurrency=8 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/point_readpoint_read___engine_accretion___durability_osbuffered___keys_50000___reads_50000___concurrency_8__5
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=8   ops=50000        0.95s      52585 ops/s  min=    7.7us mean=   125.8us p50=    14.0us p99=   678.7us max= 508380.8us
+point-read   accretion-db/OsBuffered      c=8   ops=50000        0.09s     566675 ops/s  min=    8.5us mean=    13.2us p50=    12.6us p99=    23.1us max=    208.6us

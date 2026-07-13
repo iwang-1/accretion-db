@@ -1,0 +1,20 @@
+## run 1  ARGS: fill-random --engine sled --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Sled durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_sled___durability_always___keys_3000___concurrency_1__1
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/insert+flush(durable)   c=1   ops=3000         2.80s       1070 ops/s  min=  799.5us mean=   934.1us p50=   926.0us p99=  1109.4us max=   2044.8us
+## run 2  ARGS: fill-random --engine sled --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Sled durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_sled___durability_always___keys_3000___concurrency_1__2
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/insert+flush(durable)   c=1   ops=3000         2.80s       1072 ops/s  min=  787.6us mean=   932.4us p50=   924.4us p99=  1095.6us max=   1850.5us
+## run 3  ARGS: fill-random --engine sled --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Sled durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_sled___durability_always___keys_3000___concurrency_1__3
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/insert+flush(durable)   c=1   ops=3000         2.80s       1073 ops/s  min=  827.4us mean=   931.4us p50=   924.2us p99=  1096.5us max=   1740.8us
+## run 4  ARGS: fill-random --engine sled --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Sled durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_sled___durability_always___keys_3000___concurrency_1__4
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/insert+flush(durable)   c=1   ops=3000         2.80s       1070 ops/s  min=  790.5us mean=   933.5us p50=   927.7us p99=  1116.6us max=   2151.8us
+## run 5  ARGS: fill-random --engine sled --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Sled durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_sled___durability_always___keys_3000___concurrency_1__5
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  sled/insert+flush(durable)   c=1   ops=3000         2.83s       1061 ops/s  min=  827.0us mean=   941.3us p50=   927.1us p99=  1122.0us max=  20855.5us

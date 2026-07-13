@@ -1,0 +1,20 @@
+## run 1  ARGS: fill-random --engine accretion --durability osbuffered --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=OsBuffered keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_osbuffered___keys_10000___concurrency_1___memtable_bytes_67108864__1
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=1   ops=10000        0.19s      51895 ops/s  min=    7.9us mean=    19.1us p50=    11.5us p99=    26.7us max=   1144.9us
+## run 2  ARGS: fill-random --engine accretion --durability osbuffered --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=OsBuffered keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_osbuffered___keys_10000___concurrency_1___memtable_bytes_67108864__2
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=1   ops=10000        0.14s      69015 ops/s  min=    7.8us mean=    14.3us p50=     9.2us p99=    18.8us max=   1101.6us
+## run 3  ARGS: fill-random --engine accretion --durability osbuffered --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=OsBuffered keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_osbuffered___keys_10000___concurrency_1___memtable_bytes_67108864__3
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=1   ops=10000        0.15s      67637 ops/s  min=    7.6us mean=    14.6us p50=     9.1us p99=    19.5us max=   1107.4us
+## run 4  ARGS: fill-random --engine accretion --durability osbuffered --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=OsBuffered keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_osbuffered___keys_10000___concurrency_1___memtable_bytes_67108864__4
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=1   ops=10000        0.19s      52077 ops/s  min=    7.8us mean=    19.0us p50=    12.5us p99=    24.3us max=   1758.2us
+## run 5  ARGS: fill-random --engine accretion --durability osbuffered --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=OsBuffered keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_osbuffered___keys_10000___concurrency_1___memtable_bytes_67108864__5
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/OsBuffered      c=1   ops=10000        0.17s      60329 ops/s  min=    7.5us mean=    16.4us p50=     9.4us p99=    20.9us max=   1700.6us

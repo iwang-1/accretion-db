@@ -1,0 +1,20 @@
+## run 1  ARGS: fill-random --engine accretion --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Accretion durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_always___keys_3000___concurrency_1__1
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/Always          c=1   ops=3000         9.65s        311 ops/s  min= 2279.0us mean=  3216.9us p50=  3513.5us p99=  3881.3us max=   4586.1us
+## run 2  ARGS: fill-random --engine accretion --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Accretion durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_always___keys_3000___concurrency_1__2
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/Always          c=1   ops=3000         8.64s        347 ops/s  min= 1776.6us mean=  2878.4us p50=  2750.1us p99=  3786.6us max=   4103.1us
+## run 3  ARGS: fill-random --engine accretion --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Accretion durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_always___keys_3000___concurrency_1__3
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/Always          c=1   ops=3000         8.22s        365 ops/s  min= 2301.5us mean=  2740.8us p50=  2732.3us p99=  2972.6us max=   5225.8us
+## run 4  ARGS: fill-random --engine accretion --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Accretion durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_always___keys_3000___concurrency_1__4
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/Always          c=1   ops=3000         8.21s        365 ops/s  min= 2539.3us mean=  2736.8us p50=  2730.8us p99=  2939.4us max=   3249.7us
+## run 5  ARGS: fill-random --engine accretion --durability always --keys 3000 --concurrency 1
+# accretion-bench engine=Accretion durability=Always keys=3000 reads=3000 concurrency=1 memtable=4194304B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_always___keys_3000___concurrency_1__5
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/Always          c=1   ops=3000         8.25s        364 ops/s  min= 2529.4us mean=  2747.7us p50=  2730.4us p99=  3075.3us max=   4588.7us

@@ -1,0 +1,20 @@
+## run 1  ARGS: fill-random --engine accretion --durability group --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=GroupCommit keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_group___keys_10000___concurrency_1___memtable_bytes_67108864__1
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/GroupCommit     c=1   ops=10000       36.73s        272 ops/s  min= 1879.6us mean=  3672.7us p50=  3686.6us p99=  3979.7us max=   6477.6us
+## run 2  ARGS: fill-random --engine accretion --durability group --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=GroupCommit keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_group___keys_10000___concurrency_1___memtable_bytes_67108864__2
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/GroupCommit     c=1   ops=10000       36.78s        272 ops/s  min= 1824.6us mean=  3678.0us p50=  3684.2us p99=  3977.5us max=  25620.9us
+## run 3  ARGS: fill-random --engine accretion --durability group --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=GroupCommit keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_group___keys_10000___concurrency_1___memtable_bytes_67108864__3
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/GroupCommit     c=1   ops=10000       36.44s        274 ops/s  min= 1808.8us mean=  3644.0us p50=  3677.8us p99=  3966.8us max=   6792.3us
+## run 4  ARGS: fill-random --engine accretion --durability group --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=GroupCommit keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_group___keys_10000___concurrency_1___memtable_bytes_67108864__4
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/GroupCommit     c=1   ops=10000       36.34s        275 ops/s  min= 1798.2us mean=  3633.5us p50=  3668.6us p99=  3965.2us max=  25686.8us
+## run 5  ARGS: fill-random --engine accretion --durability group --keys 10000 --concurrency 1 --memtable-bytes 67108864
+# accretion-bench engine=Accretion durability=GroupCommit keys=10000 reads=10000 concurrency=1 memtable=67108864B seed=24301 dir=/tmp/tmp.1DgmT8QE4n/fill_randomfill_random___engine_accretion___durability_group___keys_10000___concurrency_1___memtable_bytes_67108864__5
+# NOTE: absolute numbers here are NOT resume figures — the committed benchmark matrix (S6) runs on the disclosed build host.
+fill-random  accretion-db/GroupCommit     c=1   ops=10000       36.11s        277 ops/s  min= 1803.9us mean=  3610.6us p50=  3650.2us p99=  3924.1us max=   6537.4us
