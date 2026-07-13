@@ -29,5 +29,6 @@ pub mod memtable;
 pub mod sstable;
 pub mod storage;
 pub mod testkit;
+pub mod wal;
 
 pub use storage::{RealFs, SimFs, Storage, StorageError, StorageResult};
