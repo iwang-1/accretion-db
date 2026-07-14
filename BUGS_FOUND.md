@@ -93,7 +93,7 @@ made SimFs model the exact POSIX rename-durability guarantee the manifest and WA
 depend on, so the sweep now proves the engine against a faithful power-loss model
 rather than an overly-pessimistic one.
 
-### 4. Group commit degenerated to per-write fsync — the write lock was held across the append (S5.5)
+### 3. Group commit degenerated to per-write fsync — the write lock was held across the append (S5.5)
 
 **Found by:** the benchmark calibration itself (the throughput harness). At every
 concurrency the `Durability::GroupCommit` fill matched `Durability::Always`
