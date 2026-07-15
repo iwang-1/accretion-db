@@ -1,15 +1,15 @@
 # Bugs found
 
-A journal of crash-consistency bugs the harness caught while building this
-engine.
+A journal of correctness and harness-fidelity bugs found by tests, benchmarks,
+and independent review while building this engine.
 
 ## The organic-bugs-only rule
 
-Entries here are **real bugs found by the harness during development** — never
-fabricated, never planted to pad the count. Each entry records: the harness
-output that exposed it (seed, crash point, failing invariant), the root cause,
-and the fix commit. The point of the harness-first discipline is that this file
-fills *organically* as the engine grows up under `SimFs`.
+Entries here are **real bugs found during development and verification** — never
+fabricated, never planted to pad the count. Each entry records the test,
+benchmark, or review that exposed it, the root cause, the fix, and a regression.
+The point of the harness-first discipline is that this file fills *organically*
+as the engine grows up under `SimFs`.
 
 ## If the count is genuinely zero at ship
 
@@ -76,22 +76,21 @@ once the parent directory is fsync'd regardless of whether the target previously
 existed, so this was SimFs modeling *less* durability than a real disk offers: a
 false positive that would have wrongly failed a *correct* engine.
 
-**Fix:** give `FileState` a `staged_durable: Option<Vec<u8>>` slot. `rename` stages
-the source inode's already-synced (`durable`) image into the destination; the
-committing `sync_dir` moves that staged image into the destination's `durable`
-bytes (superseding an existing durable image), while a crash before that
-`sync_dir` discards the staged content and the destination reverts to its old
-durable image. `sync_file` clears any staged intent (an explicit file sync makes
-the live bytes durable directly). `src/storage/sim.rs`, same commit as this entry;
-covered by the new `rename_over_durable_file_commits_new_content_on_dir_sync` and
-`rename_over_durable_reverts_if_crash_before_dir_sync` unit tests.
+**Fix:** the final model assigns every file generation an inode identity. Each
+path stores separate live and durable inode bindings; inode state separately
+stores live and synced bytes. `rename` moves the live inode identity and
+`sync_dir` commits the namespace binding, while a crash before that barrier
+restores the old binding. This also models overwrite and rollback without
+copying path-level byte snapshots. `src/storage/sim.rs`; covered by
+`rename_over_durable_file_commits_new_content_on_dir_sync` and
+`rename_over_durable_reverts_if_crash_before_dir_sync`.
 
 **Honesty note:** this is a harness-fidelity bug, logged here because the crash
 sweep is the product and its fidelity *is* the deliverable. It was a
 false-positive (the engine's manifest protocol was already correct); fixing it
-made SimFs model the exact POSIX rename-durability guarantee the manifest and WAL
-depend on, so the sweep now proves the engine against a faithful power-loss model
-rather than an overly-pessimistic one.
+made SimFs model the POSIX rename-durability guarantee the manifest and WAL
+depend on, so the sweep now tests the engine against the simulator's documented
+fault model rather than an overly-pessimistic path model.
 
 ### 3. Group commit degenerated to per-write fsync — the write lock was held across the append (S5.5)
 
@@ -138,14 +137,63 @@ real concurrency exposes that the layer above the WAL was serializing writers
 before they could batch — a genuine integration-level bug the closed-loop
 benchmark surfaced.
 
-**Crash-consistency re-proof (post-fix, S5.5c):** because the fix restructured the
-write path's locking — exactly what the crash proof depends on — the full crash
+**Crash-consistency re-verification (post-fix, S5.5c):** because the fix restructured the
+write path's locking — exactly what the crash invariant depends on — the full crash
 suite was re-run against the new `claim → log (unlocked) → apply` phasing. All
 green, zero acknowledged-write loss, no regression introduced:
 `crash::exhaustive` 4/4 (330 distinct crash points × 4 seeds × 2 durable modes =
 2640 crash executions), `crash::schedules::random_schedule_zero_acked_loss` (160
-proptest cases), and `process_kill` 2/2 (131 acked keys survived a mid-load
-SIGKILL; 82 keys survived 3 repeated SIGKILL/recover rounds).
+proptest cases), and `process_kill` 2/2 (one single-kill run plus 3 repeated
+SIGKILL/recover rounds). Acknowledged-key counts are printed at runtime and vary
+with host timing; the invariant is that every acknowledged key survives.
+
+### 4. WAL replay order could let an older sequence overwrite a newer value
+
+**Found by:** an independent concurrency audit of the three-phase write path.
+Writers claim sequence numbers under the DB mutex but append to the WAL after
+releasing it, so a writer with sequence 2 can reach the WAL before sequence 1.
+A deterministic regression wrote records in `[2, 1]` order for one key through
+the real WAL and reopened in both durable modes.
+
+**Root cause:** live writes already used `MemtableSet::insert_if_newer`, but
+`Db::open_on` replayed recovered records with unconditional `insert`. WAL replay
+therefore treated physical append order as logical version order and could end
+with the stale sequence-1 value after a restart.
+
+**Fix:** recovery now uses the same sequence-aware insertion rule as the live
+path. `db::tests::recovery_keeps_highest_sequence_when_wal_order_differs`
+appends the inverted sequence order, waits for durable acknowledgements,
+simulates a crash, reopens, and requires sequence 2 to win under both `Always`
+and `GroupCommit`.
+
+### 5. SimFs conflated path reuse and forgot older unsynced append candidates
+
+**Found by:** independent fault-model review plus focused negative controls. The
+path-level representation had two related fidelity holes. First, deleting a
+durable file and recreating the same path reused the old durable byte image, so
+a directory sync could make a crash resurrect bytes from the prior file
+generation. Second, one global `last_append` pointer was cleared when the newest
+appended file was synced, even if an older file still had an unsynced append
+eligible for tearing.
+
+**Root cause:** path namespace state, inode identity, byte durability, and tear
+ordering were collapsed into one `FileState`. That cannot represent a live new
+inode and an old durable inode at the same pathname simultaneously, nor more
+than one outstanding unsynced append.
+
+**Fix:** `SimFs` now stores separate live/durable inode bindings per path and
+live/durable bytes per inode generation. `create` allocates a generation;
+`rename` moves identity; `sync_file` durably updates only the live inode;
+`sync_dir` commits bindings. Each inode also records its newest unsynced append
+sequence, so crash selection scans all durably reachable candidates. Regressions
+cover crash before/after the delete-recreate directory switch, syncing the new
+inode before switching the name, rename identity and tear-path behavior,
+same-path rename, and the two-file append/sync ordering case.
+
+**Honesty note:** these were simulator defects, not storage-engine defects. They
+are release blockers because the simulator's fidelity determines what the crash
+campaign can legitimately claim. The model remains intentionally bounded and
+does not claim to enumerate every filesystem or hardware failure outcome.
 
 ## Harness validation (positive control)
 

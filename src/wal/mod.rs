@@ -25,9 +25,10 @@
 //!   writers (see the group-commit math in `DESIGN_NOTES.md`): throughput scales
 //!   toward `N ×` the per-write ceiling while single-write latency rises toward
 //!   one batch interval.
-//! * [`Durability::OsBuffered`] — ack after the buffered write with **no**
-//!   `fsync`. Fast but *not crash-safe*: an acked write can be lost on power
-//!   loss. Offered only as the no-durability ceiling and labeled unsafe.
+//! * [`Durability::OsBuffered`] — ack without requiring a durability barrier.
+//!   Fast but *not crash-safe*: an acked write can be lost on power loss.
+//!   Segment rotation may incidentally sync data, but no ack carries a durability
+//!   guarantee. Offered only as the no-durability ceiling and labeled unsafe.
 //!
 //! The leader/follower group-commit design keeps two locks: a `coord` mutex
 //! guarding the queue and completion bookkeeping (held only briefly), and a
@@ -60,7 +61,8 @@ pub enum Durability {
     Always,
     /// Batch concurrent writers into one `fsync` (the headline mode).
     GroupCommit,
-    /// Ack after the buffered write with no `fsync` — fast, not crash-safe.
+    /// Ack without requiring a durability barrier — fast, not crash-safe.
+    /// Segment rotation may sync data, but an ack has no durability guarantee.
     OsBuffered,
 }
 
@@ -237,7 +239,7 @@ impl Wal {
         Ok(())
     }
 
-    /// `OsBuffered` path: write the frame and ack immediately — no `fsync`.
+    /// `OsBuffered` path: append without requiring a durability barrier.
     fn commit_buffered(&self, frame: Vec<u8>) -> StorageResult<()> {
         let mut w = self.writer.lock().expect("wal writer poisoned");
         w.active.append(&*self.fs, &frame)?;

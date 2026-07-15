@@ -206,7 +206,7 @@ impl Db {
         for record in &recovered.records {
             let rec = decode_record(record)?;
             next_seq = next_seq.max(rec.seq + 1);
-            memtables.insert(rec.key, rec.value);
+            memtables.insert_if_newer(rec.key, rec.value);
         }
 
         Ok(Db {
@@ -578,4 +578,61 @@ fn decode_record(buf: &[u8]) -> Result<Record> {
         key,
         value: InternalValue { seq, kind },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wal::{Wal, WalOptions};
+
+    #[test]
+    fn recovery_keeps_highest_sequence_when_wal_order_differs() {
+        for mode in [Durability::Always, Durability::GroupCommit] {
+            let sim = Arc::new(SimFs::with_seed(17));
+            let storage: Arc<dyn Storage> = sim.clone();
+            let (wal, recovered) = Wal::open(
+                Arc::clone(&storage),
+                Path::new("/db"),
+                WalOptions {
+                    durability: mode,
+                    ..Default::default()
+                },
+            )
+            .expect("open wal");
+            assert!(recovered.records.is_empty());
+
+            // Concurrent writers can claim sequence numbers in one order and
+            // reach the WAL in another. Recovery must resolve by sequence, not
+            // by replay order.
+            wal.append(&encode_record(
+                2,
+                b"key",
+                &ValueKind::Value(b"newer".to_vec()),
+            ))
+            .expect("append newer record");
+            wal.append(&encode_record(
+                1,
+                b"key",
+                &ValueKind::Value(b"stale".to_vec()),
+            ))
+            .expect("append stale record");
+            drop(wal);
+
+            sim.crash();
+            let db = Db::open_on(
+                storage,
+                Path::new("/db"),
+                Options {
+                    durability: mode,
+                    ..Default::default()
+                },
+            )
+            .expect("recover db");
+            assert_eq!(
+                db.get(b"key").expect("get recovered key"),
+                Some(b"newer".to_vec()),
+                "replay order overrode sequence order in {mode:?}"
+            );
+        }
+    }
 }

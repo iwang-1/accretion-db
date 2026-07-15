@@ -26,7 +26,9 @@
 //! `SimFs::crash` discards everything that has not been made durable by those
 //! barriers — and may additionally *tear* the most recent unsynced append.
 //! `RealFs` maps the same calls onto `fsync`/`fdatasync` and a directory-handle
-//! fsync, so code that is correct under `SimFs` is correct on real hardware.
+//! fsync. `SimFs` deliberately chooses deterministic outcomes within its stated
+//! fault model; passing it is strong evidence for those outcomes, not a claim
+//! that every filesystem or hardware failure behavior is exhaustively modeled.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -142,8 +144,10 @@ pub trait Storage: Send + Sync + fmt::Debug {
 
     /// Flush and make durable every buffered byte range of `path`.
     ///
-    /// After this returns, the current contents of `path` survive a crash. On
-    /// `RealFs` this is `fdatasync`.
+    /// After this returns, the current live inode's bytes are durable. A newly
+    /// created or renamed path still requires `sync_dir` before its namespace
+    /// binding is durable; without that binding the synced inode may be
+    /// unreachable after a crash. On `RealFs` this is `fdatasync`.
     fn sync_file(&self, path: &Path) -> StorageResult<()>;
 
     /// Make durable the directory-entry changes (creates, deletes, renames)
@@ -156,8 +160,10 @@ pub trait Storage: Send + Sync + fmt::Debug {
 
     /// Atomically rename `from` to `to`, replacing `to` if it exists.
     ///
-    /// The rename is visible immediately but *volatile* until a `sync_dir` on
-    /// the parent directory (see [`sync_dir`](Storage::sync_dir)).
+    /// The rename is visible immediately but *volatile* until the affected
+    /// parent directory is synced (see [`sync_dir`](Storage::sync_dir)). For a
+    /// cross-directory rename, callers must sync both source and destination
+    /// parents; current engine call sites rename within one directory.
     fn rename(&self, from: &Path, to: &Path) -> StorageResult<()>;
 
     /// Remove the file at `path`. Volatile until a `sync_dir` on the parent.

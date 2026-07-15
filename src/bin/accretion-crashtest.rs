@@ -4,9 +4,10 @@
 //! (`RealFs`-backed) [`Db`] with [`Durability::Always`] and writes keys in a
 //! tight loop, printing each key's index to stdout **after** its `put` returns —
 //! i.e. after the write is genuinely durable on disk. The parent reads that
-//! stream of acknowledged indices, `SIGKILL`s this process mid-load (a real,
-//! un-catchable power-loss analogue — no destructor, no flush, no unwinding),
-//! then reopens the same directory and verifies every acknowledged key survived.
+//! stream of acknowledged indices, `SIGKILL`s this process mid-load (abrupt,
+//! un-catchable process death with no destructor, application flush, or
+//! unwinding), then reopens the same directory and verifies every acknowledged
+//! key survived.
 //!
 //! Two subcommands:
 //!

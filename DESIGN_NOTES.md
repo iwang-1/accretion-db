@@ -13,7 +13,7 @@ to read before whiteboarding the engine.
 [manifest atomicity](#manifest-atomicity) ·
 [concurrency model](#concurrency-model) ·
 [why not mmap/io_uring](#why-not-mmap--io_uring--a-block-cache) ·
-[crash-consistency proof](#crash-consistency-proof).
+[crash-consistency evidence](#crash-consistency-evidence).
 
 ## The `Storage` seam
 
@@ -34,7 +34,7 @@ protocol necessary — see below.
 
 **Write.** `Db::put`/`delete` funnels into one `write` method that runs in three
 phases so the db-level write mutex is held only long enough to *order* the write,
-not across the durable wait (this phasing is the fix for BUGS_FOUND #4):
+not across the durable wait (this phasing is the fix for BUGS_FOUND #3):
 
 1. *Locked:* claim the next monotonic sequence number and mark the write
    in-flight. Ordering seq under the lock is what keeps the log's logical order
@@ -77,25 +77,26 @@ On a disk whose 4 KiB `fdatasync` costs ~878 µs p50 / ~975 µs p99 (measured on
 the build host via `scripts/fsync_probe.rs`; the heavier directory fsync that
 backs rename durability is ~1.97 ms), a *bare* per-write fdatasync caps
 throughput at ~1/0.000878 ≈ **1140 writes/sec regardless of engine quality**.
-The engine's own `Always` per-put is heavier — measured ~2.7 ms — because each
-durable put fsyncs the WAL *plus* amortized SSTable and manifest syncs, roughly
-3× a bare fdatasync. Group commit batches *N* queued writers into a single
-write+fsync, dividing the fsync cost across them: throughput scales toward
-*N* × the per-fsync ceiling while single-write latency rises toward one batch
-interval. This throughput/latency tradeoff is why the headline resume number
-names the *mode* (`GroupCommit`), not just a raw figure.
+The engine's own `Always` path is heavier — measured ~2.7 ms in the WAL-bound
+c=1 run, which never flushes. Each commit issues one WAL `sync_data`; append and
+file-open work plus engine and scheduler overhead account for the rest of the
+observed latency. Group commit batches *N* queued writers into one write+fsync,
+dividing the barrier cost across them: throughput scales toward *N* × the
+per-fsync ceiling while single-write latency rises toward one batch interval.
+This throughput/latency tradeoff is why the headline resume number names the
+*mode* (`GroupCommit`), not just a raw figure.
 
 **Measured multiplier (build host, `benchmarks/RESULTS.md`).** In the
 WAL-commit-bound regime (a memtable large enough that the fill never crosses a
 flush, so the commit pipeline is what is measured), fill-random at 64 workers
 sustains a median **8,082 writes/sec** in `GroupCommit` versus **276 writes/sec**
 in `Always` at the same concurrency — a **~29× group-commit multiplier**, with
-single-write p50 latency rising from ~2.7 ms (`Always`) to ~7.4 ms
-(`GroupCommit`), exactly the throughput-for-latency trade the math predicts. The
-multiplier is bounded below the theoretical batch size because `Always` on this
-engine already pays ~3 fsyncs per put (WAL data sync, plus amortized manifest and
-directory syncs), so its per-write floor is ~2.7 ms, not the bare 878 µs
-`fdatasync`. Once the workload crosses flush + compaction boundaries, **synchronous
+same-concurrency p50 latency rising from ~3.7 ms (`Always`) to ~7.5 ms
+(`GroupCommit`), exactly the throughput-for-latency trade the math predicts. Not
+all 64 writers occupy one batch, and both paths include file, lock, and scheduler
+overhead beyond the bare 878 µs `fdatasync`; the comparison is one WAL barrier per
+`Always` write versus one shared barrier per group. Once the workload crosses
+flush + compaction boundaries, **synchronous
 compaction under the write lock** (see *Concurrency model*) becomes the dominant
 cost and collapses `GroupCommit` to ~623 writes/sec with multi-second stall
 outliers — the honest full-engine number, reported alongside the WAL-bound figure
@@ -175,7 +176,7 @@ references it.
 path and each compaction pass derive their output table id from
 `next_table_id` on the version snapshot they started from and then call
 `Manifest::install`, which unconditionally swaps in the new version. Under a
-single logical writer this is race-free and keeps the crash-consistency proof
+single logical writer this is race-free and keeps the crash-consistency reasoning
 tractable: every durable state transition is totally ordered, so the exhaustive
 crash sweep and proptest schedules reason about one linear history of manifest
 installs. Moving compaction onto a background thread would let two producers
@@ -185,7 +186,7 @@ it demands turning `install` into a transactional compare-and-apply and then
 re-establishing the crash invariant against interleaved installs. That rework is
 deliberately deferred: **background/concurrent compaction is future work.** The
 synchronous design costs write-path latency spikes when a large tier compacts,
-but buys a correctness story that is simple to prove and audit, which is the
+but buys a correctness story that is simple to inspect and audit, which is the
 point of this project.
 
 ## Why not mmap / io_uring / a block cache
@@ -193,23 +194,23 @@ point of this project.
 Out of scope by design: the engine leans on the OS page cache instead of a
 custom block cache (documented decision, revisited only if benchmarks demand
 it), and avoids io_uring/O_DIRECT to keep the code pure-Rust and portable. The
-point of the project is crash-consistency proof, not squeezing the I/O path.
+point of the project is crash-consistency evidence, not squeezing the I/O path.
 
-## Crash-consistency proof
+## Crash-consistency evidence
 
 The recovery invariant, enforced everywhere: **zero acknowledged-write loss**.
 Every `put`/`delete` that *returned* under a durable mode (`Always` /
 `GroupCommit`) is present with its exact value after recovery; an in-flight op
 that never returned is either fully applied or fully absent; there are no phantom
-keys, no corruption, and `scan` agrees with `get`. Three independent layers prove
+keys, no corruption, and `scan` agrees with `get`. Three independent layers test
 it (`tests/crash.rs`, `tests/process_kill.rs`):
 
 1. **Exhaustive deterministic sweep.** A canonical mixed workload (puts,
    overwrites, deletes over a colliding key set, sized against a 128-byte memtable
    to force multiple flushes and at least one compaction) is run once to count
    `N = 330` mutating storage ops. Then for every crash point `i in 1..=N`, across
-   four RNG seeds (which steer the tear mode — drop / torn-truncate / bit-flip on
-   the crashing op) and both durable modes, the engine is crashed after op `i`,
+   four fixed RNG seeds spanning the simulator's three tail outcomes (drop,
+   torn-truncate, and bit-flip) and both durable modes, the engine crashes after op `i`,
    reopened, and verified against a model of the acknowledged prefix — 2 640 total
    crash executions. This is the distinct-crash-point figure the résumé cites.
 
@@ -220,12 +221,12 @@ it (`tests/crash.rs`, `tests/process_kill.rs`):
    flush, a tombstone shadowing a lower tier through a compaction, a delete-heavy
    schedule — sweeping every crash point of each so CI re-runs them deterministically.
 
-3. **Real process kill.** `accretion-crashtest` writes to a real `RealFs` database
-   in `Always` mode and prints each key index only after its `put` returns durable;
-   the test `SIGKILL`s it mid-load (uncatchable, no unwinding, no destructors — a
-   true power-loss analogue), reopens on the real kernel, and confirms every acked
-   key survived. This exercises real `fsync`, real directory-entry durability, and
-   real torn-tail truncation, closing the gap between the simulator and hardware.
+3. **Real process kill.** `accretion-crashtest` writes to a real `RealFs`
+   database in `Always` mode and prints each key index only after its `put`
+   returns durable. The test sends `SIGKILL`, reopens through real filesystem
+   calls, and confirms every acknowledged key survived. The kernel and page
+   cache remain alive, so this exercises abrupt process death and reopen
+   behavior, not hardware power loss or torn-write behavior.
 
 **Why the SimFs `rename`-durability subtlety matters (BUGS_FOUND.md #2).** The
 manifest's atomic switch and the WAL's segment-truncate both `rename` a synced
@@ -233,11 +234,14 @@ temp file *over an existing durable name*. Real POSIX guarantees that once the
 parent directory is `fsync`'d the destination durably resolves to the new inode,
 whether or not the name previously existed. SimFs originally refreshed a file's
 durable image only when it was not already durably present, so it under-modeled
-this case and reported false acknowledged-write loss on a correct engine. The fix
-stages the source's synced image on `rename` and commits it into the destination's
-durable bytes on the covering `sync_dir`; a crash before that `sync_dir` discards
-it. This is the fault-model boundary the whole proof rests on, so it is modeled
-exactly, not approximately.
+this case and reported false acknowledged-write loss on a correct engine. The
+final model assigns each file generation an inode identity and stores separate
+live and durable inode bindings per path. `rename` moves the live inode identity;
+`sync_dir` commits the namespace binding; a crash before it restores the old
+binding. The same representation prevents delete/recreate from resurrecting old
+bytes or overwriting the rollback generation when only the new file is synced.
+This is evidence within the simulator's documented fault model, not an exhaustive
+model of every filesystem outcome.
 
 **Harness validation (positive control).** To show the sweep is not vacuously
 green, the `Always` fsync-before-ack was deliberately removed once: the sweep

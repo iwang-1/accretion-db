@@ -60,21 +60,21 @@ mode's fsync discipline. This is the regime the group-commit math describes.
 
 | mode | c=1 | c=8 | c=64 | write p50 @ c=64 |
 |---|---:|---:|---:|---:|
-| `Always` (fsync per put) | 369 | 348 | 276 | 3.6 ms |
-| `GroupCommit` (batched fsync) | 274 | 1,093 | **8,082** | 7.4 ms |
-| `OsBuffered` (no fsync — unsafe) | 60,329 | 38,232 | 34,361 | 20 µs |
+| `Always` (fsync per put) | 369 | 348 | 276 | 3.7 ms |
+| `GroupCommit` (batched fsync) | 274 | 1,093 | **8,082** | 7.5 ms |
+| `OsBuffered` (no durability guarantee) | 60,329 | 38,232 | 34,361 | 20 µs |
 
 throughput = writes/sec, median of 5 runs. Raw:
 [`raw/b1_walbound_*`](raw/).
 
 **Group-commit multiplier: 8,082 / 276 ≈ 29× at c=64**, bought by trading
-single-write latency (2.7 ms → 7.4 ms p50) for batched fsync amortization —
-exactly the throughput-for-latency trade the math predicts. The multiplier lands
-below the raw batch size because `Always` on this engine already pays ~3 fsyncs
-per put (WAL data sync + amortized manifest + directory syncs), so its floor is
-~2.7 ms, well above the bare 878 µs `fdatasync`. `Always` *loses* throughput as
-concurrency rises (369 → 276) because contending writers serialize on the write
-lock while each still pays its own fsync — extra threads add only lock traffic.
+same-concurrency p50 latency (3.7 ms → 7.5 ms) for batched fsync amortization —
+exactly the throughput-for-latency trade the math predicts. This no-flush setup
+means `Always` executes one WAL `sync_data` per put; the observed 3.7 ms also
+includes append/file-open, locking, and scheduler overhead. The comparison is one
+barrier per `Always` write versus one shared barrier per group. `Always` *loses*
+throughput as concurrency rises (369 → 276) because contending writers serialize
+while each still pays its own barrier — extra threads add only lock traffic.
 
 ### 3b. Full-engine regime (default 4 MiB memtable — crosses flush + compaction)
 
@@ -151,7 +151,7 @@ From `tests/crash.rs` (run under `SimFs`, the deterministic power-loss simulator
 | count | value | source |
 |---|---:|---|
 | distinct exhaustive crash points (`N`) | **330** | `exhaustive::reports_crash_point_count` |
-| tear-mode seeds per point (drop/torn/bit-flip) | 4 | `SEEDS` |
+| fixed seeds per point (spanning drop/torn/bit-flip) | 4 | `SEEDS` |
 | durable modes swept (`Always`, `GroupCommit`) | 2 | — |
 | **total exhaustive crash executions** | **2,640** | 330 × 4 × 2 |
 | property-based random crash schedules | **160** | `schedules::random_schedule_zero_acked_loss` proptest cases |
@@ -159,7 +159,9 @@ From `tests/crash.rs` (run under `SimFs`, the deterministic power-loss simulator
 
 Every one recovers with **zero acknowledged-write loss** — the invariant asserted
 by `verify()`. The process-kill integration test (`tests/process_kill.rs`,
-RealFs + SIGKILL) additionally survives 3 repeated power-cut rounds.
+RealFs + SIGKILL) adds one single-kill run and 3 repeated abrupt-process-death
+rounds with a minimum-progress assertion. Acknowledged-key counts are reported
+at runtime because they are timing-dependent.
 
 ## 6. sled baseline — matched durability (wins AND losses)
 
@@ -179,12 +181,13 @@ Raw: [`raw/sled_*`](raw/), [`raw/acc_*_matched_*`](raw/).
 
 **Why sled wins the durable row, honestly:** sled's `flush()` pays a single
 fdatasync (~915 µs p50, right at the disk's `sync_data` floor), while
-accretion-db's `Always` pays ~3 fsyncs per put (WAL + amortized manifest +
-directory). accretion-db's answer to the fsync wall is **`GroupCommit`**, which
-sled has no API for — so it is reported as accretion's own headline mode against
-its own `Always` baseline (§3a), never as a sled comparison. On the read/buffered
-rows sled's lock-free architecture and years of tuning simply beat this
-teaching-scale engine, and that is the correct thing to publish.
+accretion-db's `Always` includes WAL append/file-open work, one `sync_data`, and
+engine locking around each write. accretion-db's answer to the fsync wall is
+**`GroupCommit`**, which sled has no API for — so it is reported as accretion's
+own headline mode against its own `Always` baseline (§3a), never as a sled
+comparison. On the read/buffered rows sled's lock-free architecture and years of
+tuning simply beat this teaching-scale engine, and that is the correct thing to
+publish.
 
 ## 7. Reproduce
 

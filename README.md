@@ -8,10 +8,10 @@
 An embeddable **LSM-tree storage engine** in Rust (zero `unsafe`) — CRC-framed
 write-ahead log with **group commit**, memtable with atomic freeze/flush,
 block-based SSTables with bloom filters and sparse indexes, size-tiered
-compaction, crash recovery. Its headline product is not speed but *proof*: a
+compaction, crash recovery. Its headline product is not speed but *evidence*: a
 fault-injecting storage layer that simulates power loss at **every write and
 fsync boundary** and shows the engine recovers **330** deterministic crash
-points (× 4 tear modes × 2 durable modes = **2,640 executions**) plus **160**
+points (4 deterministic seeds spanning 3 tear modes × 2 durable modes = **2,640 executions**) plus **160**
 property-based crash schedules with **zero acknowledged-write loss** — and it is
 benchmarked honestly against [sled](https://github.com/spacejam/sled),
 publishing the comparisons sled *wins*.
@@ -21,7 +21,7 @@ publishing the comparisons sled *wins*.
 Storage engines are easy to make fast and hard to make *crash-safe*. Anyone can
 buffer writes and quote a big throughput number; the interesting engineering is
 guaranteeing that a `put` which **returned** is still there after the power is
-cut mid-`fsync`. So the product of this repository is the proof, and the design
+cut mid-`fsync`. So the product of this repository is reproducible evidence, and the design
 is **harness-first**: the fault-injection layer — a deterministic, seeded
 page-cache simulator (`SimFs`) that drops, tears, and bit-flips unsynced bytes
 on `crash()` — was built and reviewed *before* the engine it judges, and every
@@ -44,7 +44,7 @@ produced on the disclosed build host. Nothing here is hand-tuned or aspirational
  ┌──────────┐  ack per durability mode              ┌──────────────────┐
  │   WAL    │  Always      = fsync per commit        │  active memtable │
  │ CRC-     │  GroupCommit = one fsync / batch       └────────┬─────────┘
- │ framed   │  OsBuffered  = no fsync (unsafe)          miss   │
+ │ framed   │  OsBuffered  = no durability guarantee    miss   │
  └────┬─────┘                                                  ▼
       │ append                                        ┌──────────────────┐
       ▼                                                │ frozen memtables │
@@ -134,16 +134,18 @@ pipeline). Median of 5 runs:
 
 | mode | c=1 | c=8 | c=64 | write p50 @ c=64 |
 |---|---:|---:|---:|---:|
-| `Always` (fsync per put) | 369 | 348 | 276 | 3.6 ms |
-| `GroupCommit` (batched fsync) | 274 | 1,093 | **8,082** | 7.4 ms |
-| `OsBuffered` (no fsync — unsafe) | 60,329 | 38,232 | 34,361 | 20 µs |
+| `Always` (fsync per put) | 369 | 348 | 276 | 3.7 ms |
+| `GroupCommit` (batched fsync) | 274 | 1,093 | **8,082** | 7.5 ms |
+| `OsBuffered` (no durability guarantee) | 60,329 | 38,232 | 34,361 | 20 µs |
 
 **Group commit buys a ~29× multiplier** (8,082 / 276 at c=64) by trading
-single-write latency (2.7 ms → 7.4 ms p50) for batched fsync amortization —
-exactly the throughput-for-latency trade the math predicts. It lands below the
-raw batch size because `Always` on this engine already pays ~3 fsyncs per put
-(WAL + amortized manifest + directory syncs), so its floor is ~2.7 ms, not the
-bare 878 µs. Full per-cell numbers, commands, and the raw outputs are in
+same-concurrency p50 latency (3.7 ms → 7.5 ms) for batched fsync amortization —
+exactly the throughput-for-latency trade the math predicts. In this no-flush
+workload, each `Always` commit issues one WAL `sync_data`; its 3.7 ms c=64 p50
+also includes append/file-open, locking, and scheduler overhead. The WAL-bound
+comparison therefore attributes the difference to one durability barrier per
+`Always` write versus one shared barrier per group, not to three fsyncs. Full
+per-cell numbers, commands, and the raw outputs are in
 [RESULTS.md](benchmarks/RESULTS.md) §3.
 
 **Honest full-engine caveat.** The ~29× is the *commit-pipeline* number. Once a
@@ -165,13 +167,13 @@ The invariant, enforced everywhere: **zero acknowledged-write loss**. Every
 is present with its exact value after recovery; an in-flight op is either fully
 applied or fully absent; there are no phantom keys, acked deletes hold, the
 manifest references only checksum-valid files that exist, and the WAL tail
-truncates cleanly. Three independent layers prove it:
+truncates cleanly. Three independent layers test it:
 
 | layer | what it does | count |
 |---|---|---:|
-| Exhaustive deterministic sweep | Run a canonical mixed workload once to count `N` mutating storage ops; for each `i in 1..=N`, fresh `SimFs`, crash after op `i` (× 4 tear-mode seeds × 2 durable modes), reopen, verify against the acked-prefix model. | **330 points → 2,640 executions** |
+| Exhaustive deterministic sweep | Run a canonical mixed workload once to count `N` mutating storage ops; for each `i in 1..=N`, fresh `SimFs`, crash after op `i` (× 4 fixed seeds spanning 3 possible tear modes × 2 durable modes), reopen, verify against the acked-prefix model. | **330 points → 2,640 executions** |
 | Property-based schedules | proptest generates random op sequences × crash indices × durability modes, shrinking failures to minimal counterexamples; 3 named fixed-seed sweeps pin the highest-risk shapes as regressions. | **160 schedules + 3 regressions** |
-| Real process kill | `accretion-crashtest` writes to a real `RealFs` DB in `Always`, prints each key only once its `put` returns durable; the parent `SIGKILL`s it mid-load (uncatchable — a true power-loss analogue), reopens on the real kernel, confirms every acked key survived, across 3 repeated rounds. | **131 keys / kill; 3 rounds** |
+| Real process kill | `accretion-crashtest` writes to a real `RealFs` DB in `Always`, prints each key only once its `put` returns durable; the parent sends `SIGKILL`, reopens against real filesystem calls, and confirms every acknowledged key survived. The kernel and page cache remain alive, so this tests abrupt process death, not hardware power loss or torn writes. | **1 single kill + 3 repeated rounds; progress floor enforced; key counts vary with timing** |
 
 ### What `SimFs` models — and what it does not
 
@@ -188,8 +190,9 @@ only ever permitted to depend on the guarantees this model makes.
 See [BUGS_FOUND.md](BUGS_FOUND.md) for the organic crash-bug journal — including
 a tombstone-resurrection bug the BTreeMap-model property test shrank to a
 four-op counterexample, a `SimFs` rename-durability fidelity fix, a group-commit
-locking bug the throughput harness surfaced, and a labelled positive-control
-that deletes one `fsync` to prove the sweep actually catches loss.
+locking bug the throughput harness surfaced, an out-of-order WAL recovery bug,
+and inode-generation/tear-order defects found by independent review. A labelled
+positive control deletes one `fsync` to show the sweep actually catches loss.
 
 ## Benchmarks vs sled — wins *and* losses
 
@@ -206,12 +209,13 @@ every matched comparison**, reported plainly:
 | Buffered point reads | 615,188 r/s | **3,686,026 r/s** | **sled (6×)** |
 
 Why, honestly: sled's `flush()` pays a single fdatasync right at the disk floor,
-while accretion's `Always` pays ~3 fsyncs per put; and sled's lock-free
-architecture and years of tuning simply beat this teaching-scale engine on reads.
-accretion-db's answer to the fsync wall is `GroupCommit`, which sled has no API
-for — so it is reported as accretion's own headline mode against its own `Always`
-baseline, never dressed up as a sled win. Methodology, matched configs, and the
-full table are in [RESULTS.md](benchmarks/RESULTS.md) §6.
+while accretion's `Always` path includes WAL append/file-open work, one
+`sync_data`, and engine locking around each write. sled's lock-free architecture
+and years of tuning also beat this teaching-scale engine on reads. accretion-db's
+answer to the fsync wall is `GroupCommit`, which sled has no API for — so it is
+reported as accretion's own headline mode against its own `Always` baseline,
+never dressed up as a sled win. Methodology, matched configs, and the full table
+are in [RESULTS.md](benchmarks/RESULTS.md) §6.
 
 ## Concurrency model (a deliberate simplicity decision)
 
@@ -222,7 +226,7 @@ compaction replaces files underneath it, because a table file is deleted only
 once no live `Version` references it (tracked by `Arc` strong count). Flush and
 compaction run on **exactly one path** — synchronously, on the writer's thread.
 
-That single-writer, totally-ordered history is *why* the crash proof is
+That single-writer, totally-ordered history is *why* the crash analysis is
 tractable: the exhaustive sweep and proptest schedules reason about one linear
 sequence of manifest installs. Moving compaction to a background thread would
 demand turning the manifest swap into a transactional compare-and-apply and
@@ -236,7 +240,7 @@ Stated plainly, each on purpose:
 
 - **Synchronous compaction.** When a tier crosses its fanout, the triggering
   write absorbs the full merge latency (the multi-second stalls in RESULTS.md
-  §3b). Bought a simple, auditable crash proof; background compaction is future
+  §3b). Bought simple, auditable crash reasoning; background compaction is future
   work.
 - **Size-tiered only.** Lower write amplification and simpler invariants, at the
   cost of higher space/read amplification — the honest tiered-vs-leveled tradeoff
@@ -244,7 +248,7 @@ Stated plainly, each on purpose:
 - **No transactions, MVCC, or column families.** A single-key durable KV store
   with range scans; no multi-key atomicity beyond a single `put`.
 - **No block cache / compression / `mmap` / `io_uring`.** Leans on the OS page
-  cache by design; the point is the crash proof, not squeezing the I/O path.
+  cache by design; the point is the crash evidence, not squeezing the I/O path.
 - **Single-host, single-process.** No network protocol, no multi-writer
   coordination. All benchmark numbers are single-host; the read numbers are
   warm-page-cache (no root to drop caches on the build host).
@@ -254,7 +258,7 @@ Stated plainly, each on purpose:
 - [DESIGN_NOTES.md](DESIGN_NOTES.md) — interview-grade defense of every
   non-obvious choice: write/read path, group-commit math, torn-tail truncation,
   bloom sizing, tiered-vs-leveled, manifest atomicity, the concurrency model, and
-  the crash proof.
+  the crash evidence.
 - [FORMAT.md](FORMAT.md) — byte-level on-disk layout of the WAL, SSTable, and
   manifest.
 - [BUGS_FOUND.md](BUGS_FOUND.md) — the organic crash-bug journal.

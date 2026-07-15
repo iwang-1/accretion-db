@@ -18,8 +18,8 @@
 //!    varies), the engine is crashed after op `i`, reopened, and verified.
 //! 2. [`schedules`] — proptest random op sequences × random crash points × random
 //!    durable modes, model-verified after recovery. Shrinks to minimal
-//!    counterexamples; the fixed-seed corpus lives in
-//!    `tests/crash.proptest-regressions`.
+//!    counterexamples; discovered failures are persisted to
+//!    `tests/crash.proptest-regressions` for replay on later runs.
 //! 3. `tests/process_kill.rs` — the real SIGKILL integration test (RealFs).
 //!
 //! The count `N` and the seed multiplier are the distinct-crash-point figure the
@@ -313,11 +313,23 @@ mod exhaustive {
 /// Property-based random crash schedules: an arbitrary op sequence, crashed at an
 /// arbitrary point, in an arbitrary durable mode, must recover with zero
 /// acknowledged-write loss. proptest shrinks any failure to a minimal
-/// counterexample; the fixed-seed regression corpus is committed alongside this
-/// file as `tests/crash.proptest-regressions` so a discovered shape re-runs in CI.
+/// counterexample. When a failure is discovered, proptest creates or updates
+/// `tests/crash.proptest-regressions` so that shape runs before new cases later.
 mod schedules {
     use super::*;
     use proptest::prelude::*;
+
+    use proptest::test_runner::FileFailurePersistence;
+
+    fn crash_proptest_config() -> ProptestConfig {
+        let mut config = ProptestConfig::with_cases(160);
+        // Integration tests are outside `src`, so avoid SourceParallel's
+        // lib.rs/main.rs ancestor lookup and persist beside this source file.
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::WithSource(
+            "proptest-regressions",
+        )));
+        config
+    }
 
     /// A small colliding key alphabet so puts, overwrites, and deletes of the same
     /// key interleave often — that collision is what stresses newest-wins and
@@ -358,7 +370,7 @@ mod schedules {
     proptest! {
         // Modest case count keeps the whole file CI-fast while still exploring
         // thousands of distinct (sequence, crash-point, mode) schedules.
-        #![proptest_config(ProptestConfig::with_cases(160))]
+        #![proptest_config(crash_proptest_config())]
 
         #[test]
         fn random_schedule_zero_acked_loss(

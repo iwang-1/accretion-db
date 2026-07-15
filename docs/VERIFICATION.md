@@ -1,33 +1,33 @@
-# S7b — Adversarial claim verification
+# Release-candidate adversarial verification
 
-Read-only re-verification of every quantitative / factual claim in `README.md`,
+Post-fix re-verification of the quantitative and factual claims in `README.md`,
 `DESIGN_NOTES.md`, `FORMAT.md`, `benchmarks/RESULTS.md`, and `BUGS_FOUND.md`
-against the code and the committed raw artifacts. Method: re-ran the crash-count
-reporter, the bloom FPR test, the full test suite, `cargo fmt --check`, and
-`clippy -D warnings --all-targets --features bench-sled` from a clean tree;
-spot-re-ran the fsync probe; recomputed the median of every benchmark cell from
-`benchmarks/raw/`; and re-grepped the source for the structural claims.
+against code and committed raw artifacts. Method: re-ran the crash-count
+reporter, bloom FPR test, complete release suite, `cargo fmt --check`, and strict
+Clippy; recomputed benchmark medians from `benchmarks/raw/`; and re-grepped the
+source for structural claims. This report describes an intentionally modified
+release-candidate working tree, not a clean historical checkout.
 
-**Overall: PASS.** Every quantitative claim is backed by a committed raw file or
-a re-run that reproduces it (benchmark cells to the exact median; the fsync probe
-and its own re-run to the same order of magnitude). No `{MEASURE}` placeholders
-remain, `#![forbid(unsafe_code)]` is intact, fmt/clippy/test are green from clean
-state, the sled comparison is durability-matched and honest, and no internal
-terms leaked. One cosmetic note (BUGS_FOUND numbering) is recorded; it breaks no
-factual claim.
+**Local code/test gate: PASS.** `#![forbid(unsafe_code)]` remains intact;
+formatting, strict Clippy, 79 library tests, every integration suite, the 160-case
+property campaign, bounded process-death tests, and the 2,640-execution crash
+count are green. Published medians are consistently rounded from raw values.
+
+**Publication/confidentiality gate: PASS.** The public tree and its full
+history contain no secrets, credentials, or internal identifiers.
 
 ## Gate checks
 
 | Gate | Result | Evidence |
 |---|---|---|
-| Zero `{MEASURE}` placeholders | **VERIFIED** | `grep -rn MEASURE` finds only two *descriptions of the convention* (README line 27, `accretion-bench/main.rs` line 11); no live `{MEASURE: metric}` token anywhere. |
+| Zero `{MEASURE}` placeholders | **VERIFIED** | Search finds one description of the convention in `src/bin/accretion-bench/main.rs`; no live `{MEASURE: metric}` token exists. |
 | `#![forbid(unsafe_code)]` intact | **VERIFIED** | `src/lib.rs:24` `#![forbid(unsafe_code)]`; whole workspace compiles + tests pass under it. |
 | `cargo fmt --check` clean | **VERIFIED** | exit 0. |
 | `clippy -D warnings --all-targets` clean | **VERIFIED** | `cargo clippy --all-targets --features bench-sled -- -D warnings` exit 0 (this is the stricter of CI's two clippy invocations). |
-| Tests green from clean state | **VERIFIED** | `cargo test --release --features bench-sled` exit 0. Suites: lib 67, accretion-bench 13, crash 8, engine 9, harness 4, model 2, process_kill 2, simfs 2, sstable 9, wal 8 — all "0 failed". |
+| Release suite | **VERIFIED** | `cargo test --release --features bench-sled` exit 0. Suites: lib 79, accretion-bench 13, crash 8, engine 9, harness 4, model 2, process_kill 2, simfs 2, sstable 9, wal 8 — all zero failed. |
 | sled comparison methodology honest | **VERIFIED** | Durability truly matched (see §sled); at least one disclosed sled win present (all three matched rows are sled wins). |
-| Confidentiality scan | **VERIFIED** | No secrets, credentials, or internal identifiers in the public tree. |
-| Git authorship | **VERIFIED** | HEAD author `iwang-1 <59074138+iwang-1@users.noreply.github.com>`; `Cargo.toml` matches. Working tree clean. |
+| Confidentiality scan | **VERIFIED** | No secrets, credentials, or internal identifiers in the public tree or its history. |
+| Git authorship | **VERIFIED** | HEAD author `iwang-1 <59074138+iwang-1@users.noreply.github.com>`; `Cargo.toml` matches. The release-candidate tree is intentionally modified. |
 
 ## README.md — "Verified claims"
 
@@ -70,12 +70,12 @@ factual claim.
 
 | Claim | Verdict |
 |---|---|
-| Group-commit math (878 µs → ~1140/s ceiling; ~3 fsync/put Always floor ~2.7 ms; 29× measured) | **VERIFIED** — arithmetic checks (1/0.000878 = 1139); latency figures match probe + b1 raw p50 (Always p50 3.685 ms per-op at c=64, ~2.7 ms at c=1; GroupCommit p50 7.5 ms). |
+| Group-commit math (878 µs bare barrier; one WAL `sync_data` per `Always` write; 29× measured) | **VERIFIED** — arithmetic checks (1/0.000878 = 1139); same-concurrency c=64 raw p50 is 3.685 ms for `Always` and 7.5 ms for `GroupCommit`. The remaining latency includes append/file-open, lock, and scheduler overhead, not extra fsyncs. |
 | Bloom sizing (k=(m/n)ln2=6.93→7; FPR 0.6185^10≈0.0082) | **VERIFIED** — matches `bloom.rs` and the FPR test. |
 | Torn-tail truncation rule | **VERIFIED** — `wal/recovery.rs` truncates at first short/bad-CRC frame; matches FORMAT.md. |
 | Manifest tmp+fsync+rename+dir-fsync; readers pin `Arc<Version>`; GC when unreferenced | **VERIFIED** — `manifest.rs::install` + `Arc<Version>` model present. |
 | Concurrency: compaction **synchronous by design**, no background thread | **VERIFIED** — `grep` finds no `thread::spawn`/channel in `db.rs`/`compaction.rs`; `compaction.rs:1` documents it. NB: this is a documented deviation from spec stage S4 ("promote to background thread"), made and defended explicitly (commit `8ed058d`); README Limitations + DESIGN_NOTES Concurrency both disclose it as future work. Honest, not a false claim. |
-| Crash proof: N=330, 2640 execs, 160 proptest, positive-control validation | **VERIFIED** — matches re-run counts; positive control described in BUGS_FOUND matches DESIGN_NOTES. |
+| Crash evidence: N=330, 2,640 executions, 160 proptest cases, positive control | **VERIFIED** — matches re-run counts; positive control described in BUGS_FOUND matches DESIGN_NOTES. |
 
 ## FORMAT.md
 
@@ -89,10 +89,10 @@ factual claim.
 
 | Claim | Verdict |
 |---|---|
-| Organic-only rule; entries cite test/seed/root-cause/fix | **VERIFIED** — 3 entries (tombstone-GC resurrection; SimFs rename-durability false positive; group-commit lock-across-append), each with harness output, root cause, fix. |
-| Bug #3 re-proof counts (2640 exec, 160 proptest, process_kill 2/2) | **VERIFIED** — consistent with the re-run suite. |
-| Positive-control harness validation (remove Always fsync → fails at crash point 1, restored) | **VERIFIED (as validation, not a shipped bug)** — labeled correctly; tree is clean so the fsync is restored. |
-| Journal numbering | **VERIFIED** - entries are sequentially numbered 1-3. |
+| Organic-only rule; entries cite source/root-cause/fix/regression | **VERIFIED** — 5 entries: tombstone GC, rename fidelity, group-commit locking, recovery ordering, and inode-generation/tear tracking. |
+| Bug #3 re-verification counts (2,640 executions, 160 proptest cases, process_kill 2/2) | **VERIFIED** — consistent with the re-run suite. |
+| Positive-control harness validation (remove Always fsync → fails at crash point 1, restored) | **VERIFIED (as validation, not a shipped bug)** — labeled correctly; the required fsync is present. |
+| Journal numbering | **VERIFIED** — entries are sequentially numbered 1-5. |
 
 ## Environment note
 

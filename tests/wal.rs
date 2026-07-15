@@ -12,7 +12,7 @@
 //!
 //! The invariant every verifier enforces is *prefix consistency*: the recovered
 //! record sequence is a prefix of what the workload wrote, each record intact.
-//! This is the WAL analogue of the toy-store proof in `tests/harness.rs`.
+//! This is the WAL analogue of the toy-store model check in `tests/harness.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -15,7 +15,7 @@
 //! |--------------------------|-------------------------------------|---------------------|
 //! | `Always`                 | record fsync'd before ack           | `flush()` after every `insert` |
 //! | `GroupCommit`            | record fsync'd (batched) before ack | *no sled equivalent* — sled has no group-commit API; reported as an accretion-only mode, never compared to sled |
-//! | `OsBuffered`             | ack after buffered write, no fsync  | default sled with `flush_every_ms = None` (background flusher disabled), never calling `flush()` |
+//! | `OsBuffered`             | no durability guarantee on ack     | sled with `flush_every_ms = None` (background flusher disabled), never calling `flush()` |
 //!
 //! ### Why these are the fair matches
 //!

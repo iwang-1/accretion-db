@@ -1,5 +1,5 @@
 //! `accretion-db` — an embeddable LSM-tree storage engine whose headline
-//! product is *proof* of crash consistency, not raw speed.
+//! product is reproducible crash-consistency evidence, not raw speed.
 //!
 //! The engine is built on top of a single narrow abstraction, the [`Storage`]
 //! trait (see [`storage`]), which stands between the LSM machinery and the

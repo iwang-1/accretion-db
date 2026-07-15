@@ -27,7 +27,7 @@
 //! byte level, or media decay of already-durable data. The engine is only ever
 //! allowed to depend on the guarantees this model makes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -82,39 +82,42 @@ pub struct CrashReport {
     pub tail_kept: u64,
 }
 
-/// The per-file page-cache model: `live` is what the process sees, `durable` is
-/// what would survive a crash right now. Appends and overwrites mutate `live`;
-/// only [`sync_file`](Storage::sync_file) copies `live` into `durable`.
+/// The page-cache state for one inode generation. Directory entries refer to
+/// these generations independently in the live and durable namespaces.
 #[derive(Debug, Clone, Default)]
-struct FileState {
+struct InodeState {
     /// Bytes visible to the process (buffered + durable).
     live: Vec<u8>,
     /// Bytes guaranteed to survive a crash (last synced image).
     durable: Vec<u8>,
-    /// Whether the path currently exists in the process-visible namespace.
-    present_live: bool,
-    /// Whether the path exists in the durable namespace (survives a crash).
-    present_durable: bool,
-    /// Content staged by a volatile [`rename`](Storage::rename) into this name:
-    /// the source inode's already-synced bytes that this name will durably
-    /// resolve to *once* a covering [`sync_dir`](Storage::sync_dir) commits the
-    /// rename. `None` unless a rename into this path is pending. A crash before
-    /// that `sync_dir` discards it (the rename reverts); the commit copies it into
-    /// [`durable`](FileState::durable). This is what makes the manifest's
-    /// tmp+sync+rename-over-`MANIFEST`+dir-sync atomic replace crash-correct even
-    /// when the destination already existed durably.
-    staged_durable: Option<Vec<u8>>,
+    /// Order of this inode's newest append not yet covered by `sync_file`.
+    last_append_seq: Option<u64>,
+}
+
+/// The two namespace images for a path. A delete followed by a recreate can
+/// point `live_inode` at a new generation while `durable_inode` still points at
+/// the old one until the parent directory is synced.
+#[derive(Debug, Clone, Default)]
+struct PathState {
+    /// Inode generation visible to the running process.
+    live_inode: Option<u64>,
+    /// Inode generation that the path resolves to after a crash.
+    durable_inode: Option<u64>,
 }
 
 /// The mutable interior of a [`SimFs`], guarded by a single [`Mutex`].
 #[derive(Debug)]
 struct SimState {
     /// The flat namespace, keyed by path. Sorted for deterministic `list`.
-    files: BTreeMap<PathBuf, FileState>,
+    files: BTreeMap<PathBuf, PathState>,
+    /// Inode generations referenced by the live or durable namespace.
+    inodes: BTreeMap<u64, InodeState>,
+    /// Monotonic inode-generation allocator.
+    next_inode: u64,
     /// Monotonic count of every mutating op (drives crash scheduling).
     op_count: u64,
-    /// Path of the most recent append; the tear target on the next crash.
-    last_append: Option<PathBuf>,
+    /// Monotonic ordering for append tear candidates across inode generations.
+    next_append_seq: u64,
     /// When `Some(n)`, a crash fires automatically once `op_count` reaches `n`.
     crash_after: Option<u64>,
     /// The report from the most recent crash, if one has occurred.
@@ -139,8 +142,10 @@ impl SimFs {
         SimFs {
             state: Mutex::new(SimState {
                 files: BTreeMap::new(),
+                inodes: BTreeMap::new(),
+                next_inode: 1,
                 op_count: 0,
-                last_append: None,
+                next_append_seq: 0,
                 crash_after: None,
                 last_report: None,
                 rng: StdRng::seed_from_u64(config.seed),
@@ -217,17 +222,30 @@ impl SimFs {
             ops_before_crash,
             ..Default::default()
         };
-        let target = st.last_append.clone().filter(|p| {
-            st.files
-                .get(p)
-                .map(|f| f.present_durable && f.live.len() > f.durable.len())
-                .unwrap_or(false)
-        });
+        let target = st
+            .inodes
+            .iter()
+            .filter_map(|(&inode_id, inode)| {
+                let seq = inode.last_append_seq?;
+                let is_durably_referenced = st
+                    .files
+                    .values()
+                    .any(|entry| entry.durable_inode == Some(inode_id));
+                (inode.live.len() > inode.durable.len() && is_durably_referenced)
+                    .then_some((seq, inode_id))
+            })
+            .max_by_key(|(seq, _)| *seq)
+            .and_then(|(_, inode_id)| {
+                st.files.iter().find_map(|(path, entry)| {
+                    (entry.durable_inode == Some(inode_id)).then(|| (path.clone(), inode_id))
+                })
+            });
 
-        if let Some(path) = target {
-            let f = st.files.get(&path).expect("target present");
-            let tail_len = (f.live.len() - f.durable.len()) as u64;
-            let tail: Vec<u8> = f.live[f.durable.len()..].to_vec();
+        if let Some((path, inode_id)) = target {
+            let inode = st.inodes.get(&inode_id).expect("target inode present");
+            let durable_len = inode.durable.len();
+            let tail_len = (inode.live.len() - durable_len) as u64;
+            let tail: Vec<u8> = inode.live[durable_len..].to_vec();
             // Choose how the tail is mangled. Weighted toward Drop/Truncate,
             // the physically common outcomes; BitFlip exercises the CRC path.
             let mode = match st.rng.gen_range(0u8..3) {
@@ -235,7 +253,7 @@ impl SimFs {
                 1 => TearMode::Truncate,
                 _ => TearMode::BitFlip,
             };
-            let mut kept = f.durable.clone();
+            let mut kept = inode.durable.clone();
             let tail_kept: u64 = match mode {
                 TearMode::Drop => 0,
                 TearMode::Truncate => {
@@ -248,30 +266,33 @@ impl SimFs {
                     kept.extend_from_slice(&tail);
                     // Flip one bit somewhere in the unsynced tail region.
                     let bit = st.rng.gen_range(0..(tail_len * 8)) as usize;
-                    let byte = f.durable.len() + bit / 8;
+                    let byte = durable_len + bit / 8;
                     kept[byte] ^= 1 << (bit % 8);
                     tail_len
                 }
             };
-            report.torn_path = Some(path.clone());
+            report.torn_path = Some(path);
             report.tear_mode = mode;
             report.tail_len = tail_len;
             report.tail_kept = tail_kept;
-            let fs = st.files.get_mut(&path).expect("target present");
-            fs.durable = kept;
+            st.inodes
+                .get_mut(&inode_id)
+                .expect("target inode present")
+                .durable = kept;
         }
 
-        // Revert every file to its durable image: buffered data, volatile
-        // directory-entry changes, and any uncommitted staged rename are lost.
-        for f in st.files.values_mut() {
-            f.live = f.durable.clone();
-            f.present_live = f.present_durable;
-            f.staged_durable = None;
+        // Revert every inode and path to its durable image. A volatile
+        // delete/recreate therefore restores the old durable inode generation.
+        for inode in st.inodes.values_mut() {
+            inode.live = inode.durable.clone();
+            inode.last_append_seq = None;
         }
-        // Files that never became durably present disappear entirely.
-        st.files.retain(|_, f| f.present_durable);
+        for entry in st.files.values_mut() {
+            entry.live_inode = entry.durable_inode;
+        }
+        st.files.retain(|_, entry| entry.durable_inode.is_some());
+        Self::collect_unreferenced_inodes(st);
 
-        st.last_append = None;
         st.crash_after = None;
         st.last_report = Some(report.clone());
         report
@@ -288,6 +309,17 @@ impl SimFs {
             Self::crash_locked(st);
         }
     }
+
+    fn collect_unreferenced_inodes(st: &mut SimState) {
+        let referenced: BTreeSet<u64> = st
+            .files
+            .values()
+            .flat_map(|entry| [entry.live_inode, entry.durable_inode])
+            .flatten()
+            .collect();
+        st.inodes
+            .retain(|inode_id, _| referenced.contains(inode_id));
+    }
 }
 
 /// Return `true` if `path` is a direct child of `dir` (same parent).
@@ -298,15 +330,21 @@ fn is_child_of(path: &Path, dir: &Path) -> bool {
 impl Storage for SimFs {
     fn create(&self, path: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
-        let entry = st.files.entry(path.to_path_buf()).or_default();
-        if entry.present_live {
+        if st
+            .files
+            .get(path)
+            .is_some_and(|entry| entry.live_inode.is_some())
+        {
             return Err(StorageError::AlreadyExists(path.to_path_buf()));
         }
-        // A fresh, empty, process-visible file. Its directory entry is not
-        // durable until a `sync_dir` on the parent, so `present_durable` and
-        // `durable` are left untouched.
-        entry.present_live = true;
-        entry.live.clear();
+
+        let inode_id = st.next_inode;
+        st.next_inode += 1;
+        st.inodes.insert(inode_id, InodeState::default());
+        // Keep any old durable directory entry intact. The new generation is
+        // process-visible immediately but replaces the old one durably only
+        // after a parent-directory sync.
+        st.files.entry(path.to_path_buf()).or_default().live_inode = Some(inode_id);
         Self::bump(&mut st);
         Ok(())
     }
@@ -314,38 +352,41 @@ impl Storage for SimFs {
     fn open(&self, path: &Path) -> StorageResult<()> {
         let st = self.state.lock().expect("simfs poisoned");
         match st.files.get(path) {
-            Some(f) if f.present_live => Ok(()),
+            Some(entry) if entry.live_inode.is_some() => Ok(()),
             _ => Err(StorageError::NotFound(path.to_path_buf())),
         }
     }
 
     fn append(&self, path: &Path, data: &[u8]) -> StorageResult<u64> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        let inode_id = st
+            .files
+            .get(path)
+            .and_then(|entry| entry.live_inode)
+            .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
+        let append_seq = st.next_append_seq;
+        st.next_append_seq += 1;
         let offset = {
-            let f = st
-                .files
-                .get_mut(path)
-                .filter(|f| f.present_live)
-                .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
-            let offset = f.live.len() as u64;
-            f.live.extend_from_slice(data);
+            let inode = st.inodes.get_mut(&inode_id).expect("live inode present");
+            let offset = inode.live.len() as u64;
+            inode.live.extend_from_slice(data);
+            inode.last_append_seq = Some(append_seq);
             offset
         };
-        // The tear target on the next crash is always the most recent append.
-        st.last_append = Some(path.to_path_buf());
         Self::bump(&mut st);
         Ok(offset)
     }
 
     fn write_at(&self, path: &Path, offset: u64, data: &[u8]) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        let inode_id = st
+            .files
+            .get(path)
+            .and_then(|entry| entry.live_inode)
+            .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
         {
-            let f = st
-                .files
-                .get_mut(path)
-                .filter(|f| f.present_live)
-                .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
-            let len = f.live.len() as u64;
+            let inode = st.inodes.get_mut(&inode_id).expect("live inode present");
+            let len = inode.live.len() as u64;
             if offset > len || offset + data.len() as u64 > len {
                 return Err(StorageError::OutOfBounds {
                     path: path.to_path_buf(),
@@ -354,7 +395,7 @@ impl Storage for SimFs {
                 });
             }
             let start = offset as usize;
-            f.live[start..start + data.len()].copy_from_slice(data);
+            inode.live[start..start + data.len()].copy_from_slice(data);
         }
         Self::bump(&mut st);
         Ok(())
@@ -362,12 +403,13 @@ impl Storage for SimFs {
 
     fn read_at(&self, path: &Path, offset: u64, buf: &mut [u8]) -> StorageResult<usize> {
         let st = self.state.lock().expect("simfs poisoned");
-        let f = st
+        let inode_id = st
             .files
             .get(path)
-            .filter(|f| f.present_live)
+            .and_then(|entry| entry.live_inode)
             .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
-        let len = f.live.len() as u64;
+        let inode = st.inodes.get(&inode_id).expect("live inode present");
+        let len = inode.live.len() as u64;
         if offset > len {
             return Err(StorageError::OutOfBounds {
                 path: path.to_path_buf(),
@@ -376,88 +418,56 @@ impl Storage for SimFs {
             });
         }
         let start = offset as usize;
-        let n = buf.len().min(f.live.len() - start);
-        buf[..n].copy_from_slice(&f.live[start..start + n]);
+        let n = buf.len().min(inode.live.len() - start);
+        buf[..n].copy_from_slice(&inode.live[start..start + n]);
         Ok(n)
     }
 
     fn sync_file(&self, path: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
-        {
-            let f = st
-                .files
-                .get_mut(path)
-                .filter(|f| f.present_live)
-                .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
-            // Promote every buffered byte to durable. The directory entry's
-            // durability is a separate concern (`sync_dir`), so `present_durable`
-            // is intentionally not set here. An explicit file sync makes these
-            // exact bytes durable, superseding any staged rename intent.
-            f.durable = f.live.clone();
-            f.staged_durable = None;
-        }
-        // This file's tail is now durable, so it is no longer a tear target.
-        if st.last_append.as_deref() == Some(path) {
-            st.last_append = None;
-        }
+        let inode_id = st
+            .files
+            .get(path)
+            .and_then(|entry| entry.live_inode)
+            .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
+        let inode = st.inodes.get_mut(&inode_id).expect("live inode present");
+        inode.durable = inode.live.clone();
+        inode.last_append_seq = None;
         Self::bump(&mut st);
         Ok(())
     }
 
     fn sync_dir(&self, dir: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
-        for (p, f) in st.files.iter_mut() {
-            if !is_child_of(p, dir) {
+        for (path, entry) in st.files.iter_mut() {
+            if !is_child_of(path, dir) {
                 continue;
             }
-            if f.present_live {
-                // Commit any rename staged into this name: the destination now
-                // durably resolves to the source's synced content, even if this
-                // name already existed durably (an atomic overwrite). Otherwise a
-                // freshly-created entry adopts its current content as durable
-                // (the engine `sync_file`s file bytes before this `sync_dir`).
-                if let Some(staged) = f.staged_durable.take() {
-                    f.durable = staged;
-                } else if !f.present_durable {
-                    f.durable = f.live.clone();
-                }
-                f.present_durable = true;
-            } else {
-                // An unlink (delete/rename source) becomes durable.
-                f.present_durable = false;
-                f.staged_durable = None;
-            }
+            // Commit the live directory entry exactly. The selected inode's
+            // buffered bytes remain governed by `sync_file`.
+            entry.durable_inode = entry.live_inode;
         }
-        // Drop entries that are now absent in both namespaces.
-        st.files.retain(|_, f| f.present_live || f.present_durable);
+        st.files
+            .retain(|_, entry| entry.live_inode.is_some() || entry.durable_inode.is_some());
+        Self::collect_unreferenced_inodes(&mut st);
         Self::bump(&mut st);
         Ok(())
     }
 
     fn rename(&self, from: &Path, to: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
-        let src = st
+        let inode_id = st
             .files
             .get(from)
-            .filter(|f| f.present_live)
+            .and_then(|entry| entry.live_inode)
             .ok_or_else(|| StorageError::NotFound(from.to_path_buf()))?;
-        let bytes = src.live.clone();
-        // The content this rename will durably resolve to once committed is the
-        // source inode's *synced* image. The engine's contract is to `sync_file`
-        // the source before renaming (the manifest/WAL tmp+sync+rename protocol),
-        // so `src.durable` is that content; stage it for the destination.
-        let staged = src.durable.clone();
-        // Link `to` at the source's current content; unlink `from`. Both changes
-        // are volatile in the live namespace until a `sync_dir` on the parent.
-        // Crucially, staging the durable image means a `sync_dir` makes `to`
-        // durably resolve to the *new* bytes even when `to` already existed
-        // durably (an atomic overwrite), and a crash before that `sync_dir`
-        // reverts `to` to whatever it durably was.
-        let dst = st.files.entry(to.to_path_buf()).or_default();
-        dst.present_live = true;
-        dst.live = bytes;
-        dst.staged_durable = Some(staged);
-        st.files.get_mut(from).expect("source present").present_live = false;
+        if from != to {
+            // Move the live directory link to the same inode generation. Both
+            // namespace changes remain volatile until `sync_dir`.
+            st.files.entry(to.to_path_buf()).or_default().live_inode = Some(inode_id);
+            st.files.get_mut(from).expect("source present").live_inode = None;
+        }
+        Self::collect_unreferenced_inodes(&mut st);
         Self::bump(&mut st);
         Ok(())
     }
@@ -465,16 +475,16 @@ impl Storage for SimFs {
     fn delete(&self, path: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
         {
-            let f = st
+            let entry = st
                 .files
                 .get_mut(path)
-                .filter(|f| f.present_live)
+                .filter(|entry| entry.live_inode.is_some())
                 .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
-            // Volatile until a `sync_dir`: the entry is gone from the process
-            // view but survives a crash unless the unlink was made durable.
-            f.present_live = false;
-            f.live.clear();
+            // Volatile until a `sync_dir`: the durable path can still point to
+            // the old inode generation after this live link disappears.
+            entry.live_inode = None;
         }
+        Self::collect_unreferenced_inodes(&mut st);
         Self::bump(&mut st);
         Ok(())
     }
@@ -484,8 +494,8 @@ impl Storage for SimFs {
         let out: Vec<PathBuf> = st
             .files
             .iter()
-            .filter(|(p, f)| f.present_live && is_child_of(p, dir))
-            .map(|(p, _)| p.clone())
+            .filter(|(path, entry)| entry.live_inode.is_some() && is_child_of(path, dir))
+            .map(|(path, _)| path.clone())
             .collect();
         // `files` is a BTreeMap, so iteration — and thus this list — is sorted.
         Ok(out)
@@ -493,11 +503,17 @@ impl Storage for SimFs {
 
     fn len(&self, path: &Path) -> StorageResult<u64> {
         let st = self.state.lock().expect("simfs poisoned");
-        st.files
+        let inode_id = st
+            .files
             .get(path)
-            .filter(|f| f.present_live)
-            .map(|f| f.live.len() as u64)
-            .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))
+            .and_then(|entry| entry.live_inode)
+            .ok_or_else(|| StorageError::NotFound(path.to_path_buf()))?;
+        Ok(st
+            .inodes
+            .get(&inode_id)
+            .expect("live inode present")
+            .live
+            .len() as u64)
     }
 }
 
@@ -667,5 +683,205 @@ mod tests {
         fs.open(&a).expect("a survives the volatile rename");
         assert!(matches!(fs.open(&b), Err(StorageError::NotFound(_))));
         assert_eq!(read_all(&fs, &a), b"payload");
+    }
+
+    /// Syncing a directory commits the file name, not its buffered payload.
+    /// After a crash the path therefore remains, while the payload is still
+    /// treated as an unsynced tail rather than silently promoted to durable.
+    #[test]
+    fn dir_sync_commits_name_but_not_unsynced_bytes() {
+        let fs = SimFs::with_seed(11);
+        let p = root().join("named-but-buffered");
+        let payload = b"not-yet-durable";
+
+        fs.create(&p).expect("create");
+        fs.append(&p, payload).expect("append");
+        fs.sync_dir(&root()).expect("sync directory entry");
+
+        let report = fs.crash();
+        fs.open(&p).expect("directory-synced name survives");
+        assert_eq!(report.torn_path.as_deref(), Some(p.as_path()));
+        assert_eq!(report.tail_len, payload.len() as u64);
+    }
+
+    #[test]
+    fn delete_recreate_before_dir_sync_restores_old_generation() {
+        let fs = SimFs::with_seed(19);
+        let p = root().join("reused");
+        fs.create(&p).expect("create old");
+        fs.append(&p, b"old-generation").expect("append old");
+        fs.sync_file(&p).expect("sync old data");
+        fs.sync_dir(&root()).expect("sync old name");
+
+        fs.delete(&p).expect("delete old");
+        fs.create(&p).expect("create new");
+        fs.append(&p, b"new-generation").expect("append new");
+
+        fs.crash();
+        assert_eq!(read_all(&fs, &p), b"old-generation");
+    }
+
+    #[test]
+    fn delete_recreate_dir_sync_never_resurrects_old_bytes() {
+        let fs = SimFs::with_seed(23);
+        let p = root().join("reused");
+        fs.create(&p).expect("create old");
+        fs.append(&p, b"old-generation").expect("append old");
+        fs.sync_file(&p).expect("sync old data");
+        fs.sync_dir(&root()).expect("sync old name");
+
+        fs.delete(&p).expect("delete old");
+        fs.create(&p).expect("create new");
+        fs.append(&p, b"new").expect("append new");
+        fs.sync_dir(&root()).expect("commit new name");
+
+        let report = fs.crash();
+        assert_eq!(report.torn_path.as_deref(), Some(p.as_path()));
+        assert_ne!(read_all(&fs, &p), b"old-generation");
+    }
+
+    #[test]
+    fn syncing_recreated_file_before_dir_sync_preserves_old_generation() {
+        let fs = SimFs::with_seed(29);
+        let p = root().join("reused");
+        fs.create(&p).expect("create old");
+        fs.append(&p, b"old-generation").expect("append old");
+        fs.sync_file(&p).expect("sync old data");
+        fs.sync_dir(&root()).expect("sync old name");
+
+        fs.delete(&p).expect("delete old");
+        fs.create(&p).expect("create new");
+        fs.append(&p, b"new-generation").expect("append new");
+        fs.sync_file(&p).expect("sync new data only");
+
+        fs.crash();
+        assert_eq!(read_all(&fs, &p), b"old-generation");
+    }
+
+    #[test]
+    fn syncing_recreated_file_and_dir_commits_new_generation() {
+        let fs = SimFs::with_seed(31);
+        let p = root().join("reused");
+        fs.create(&p).expect("create old");
+        fs.append(&p, b"old-generation").expect("append old");
+        fs.sync_file(&p).expect("sync old data");
+        fs.sync_dir(&root()).expect("sync old name");
+
+        fs.delete(&p).expect("delete old");
+        fs.create(&p).expect("create new");
+        fs.append(&p, b"new-generation").expect("append new");
+        fs.sync_file(&p).expect("sync new data");
+        fs.sync_dir(&root()).expect("commit new name");
+
+        fs.crash();
+        assert_eq!(read_all(&fs, &p), b"new-generation");
+    }
+
+    #[test]
+    fn rename_to_same_path_is_a_noop() {
+        let fs = SimFs::with_seed(37);
+        let p = root().join("same");
+        fs.create(&p).expect("create");
+        fs.append(&p, b"content").expect("append");
+        fs.sync_file(&p).expect("sync data");
+        fs.sync_dir(&root()).expect("sync name");
+
+        fs.rename(&p, &p).expect("rename same path");
+        assert_eq!(read_all(&fs, &p), b"content");
+        fs.crash();
+        assert_eq!(read_all(&fs, &p), b"content");
+    }
+
+    #[test]
+    fn syncing_newest_append_reveals_previous_unsynced_tear_candidate() {
+        let fs = SimFs::with_seed(41);
+        let a = setup_synced_file(&fs, "a");
+        let b = setup_synced_file(&fs, "b");
+
+        fs.append(&a, b"older-unsynced").expect("append a");
+        fs.append(&b, b"newer-then-synced").expect("append b");
+        fs.sync_file(&b).expect("sync b");
+
+        let report = fs.crash();
+        assert_eq!(report.torn_path.as_deref(), Some(a.as_path()));
+        assert_eq!(report.tail_len, b"older-unsynced".len() as u64);
+        assert_eq!(read_all(&fs, &b), b"newer-then-synced");
+    }
+
+    #[test]
+    fn unsynced_append_follows_durable_source_name_before_rename_commit() {
+        let fs = SimFs::with_seed(43);
+        let source = setup_synced_file(&fs, "source");
+        let destination = root().join("destination");
+
+        fs.append(&source, b"tail").expect("append source");
+        fs.rename(&source, &destination).expect("rename");
+
+        let report = fs.crash();
+        assert_eq!(report.torn_path.as_deref(), Some(source.as_path()));
+        fs.open(&source).expect("durable source name restored");
+        assert!(matches!(
+            fs.open(&destination),
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn unsynced_append_follows_destination_after_rename_commit() {
+        let fs = SimFs::with_seed(47);
+        let source = setup_synced_file(&fs, "source");
+        let destination = root().join("destination");
+
+        fs.append(&source, b"tail").expect("append source");
+        fs.rename(&source, &destination).expect("rename");
+        fs.sync_dir(&root()).expect("commit rename");
+
+        let report = fs.crash();
+        assert_eq!(report.torn_path.as_deref(), Some(destination.as_path()));
+        assert!(matches!(fs.open(&source), Err(StorageError::NotFound(_))));
+        fs.open(&destination)
+            .expect("durable destination name survives");
+    }
+
+    #[test]
+    fn rename_overwrite_collects_unreachable_live_inodes() {
+        let fs = SimFs::with_seed(53);
+        let a = root().join("a");
+        let b = root().join("b");
+        let c = root().join("c");
+        for path in [&a, &b, &c] {
+            fs.create(path).expect("create live generation");
+        }
+        assert_eq!(fs.state.lock().expect("simfs poisoned").inodes.len(), 3);
+
+        fs.rename(&a, &b).expect("overwrite b");
+        assert_eq!(fs.state.lock().expect("simfs poisoned").inodes.len(), 2);
+        fs.rename(&b, &c).expect("overwrite c");
+        assert_eq!(fs.state.lock().expect("simfs poisoned").inodes.len(), 1);
+    }
+
+    #[test]
+    fn cross_directory_rename_requires_both_directory_syncs() {
+        let fs = SimFs::with_seed(59);
+        let source_dir = PathBuf::from("/source-dir");
+        let destination_dir = PathBuf::from("/destination-dir");
+        let source = source_dir.join("file");
+        let destination = destination_dir.join("file");
+
+        fs.create(&source).expect("create source");
+        fs.append(&source, b"content").expect("append source");
+        fs.sync_file(&source).expect("sync source data");
+        fs.sync_dir(&source_dir).expect("sync source name");
+
+        fs.rename(&source, &destination)
+            .expect("cross-directory rename");
+        fs.sync_dir(&source_dir).expect("commit source unlink");
+        fs.sync_dir(&destination_dir)
+            .expect("commit destination link");
+
+        fs.crash();
+        assert!(matches!(fs.open(&source), Err(StorageError::NotFound(_))));
+        fs.open(&destination).expect("destination survives");
+        assert_eq!(read_all(&fs, &destination), b"content");
     }
 }
