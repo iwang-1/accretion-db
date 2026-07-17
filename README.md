@@ -120,6 +120,8 @@ bash scripts/run_matrix.sh
 
 ## The durability-mode table
 
+![Durable writes/sec at c=64 (WAL-bound, log scale): Always fsync-per-put sustains 276 writes/sec while GroupCommit reaches 8,082 — a ~29x gain at the same durability guarantee.](docs/benchmark.png)
+
 The story starts with the disk. `scripts/fsync_probe.rs` measures this host's
 4 KiB durability calls: **`fdatasync` p50 = 878 µs** (what the WAL commit path
 pays), with the heavier directory fsync behind rename durability at ~1.97 ms. At
