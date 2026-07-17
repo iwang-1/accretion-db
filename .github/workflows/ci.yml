@@ -8,7 +8,7 @@ name: CI
 #
 # Sizing note (2-core hosted runner): every job here is measured, not guessed.
 # The exhaustive crash sweep (N distinct crash points x 4 tear-mode seeds x 2
-# durable modes) runs IN FULL — it is the crown jewel and completes in ~3s even
+# durable modes) runs IN FULL — it is the core guarantee and completes in ~3s even
 # single-threaded. Only the *randomized* proptest schedules are capped, via
 # PROPTEST_CASES below; the full-size randomized run and all benchmark numbers
 # are produced on the disclosed build host in stage S6, never asserted in CI.

@@ -83,34 +83,34 @@ block that could hold the key. Full walkthrough in
 ```rust
 use accretion_db::{Db, Options, Durability};
 
-# fn main() -> Result<(), accretion_db::DbError> {
-// GroupCommit: concurrent writers share one fsync per batch (the headline mode).
-let db = Db::open("/tmp/mydb", Options {
-    durability: Durability::GroupCommit,
-    ..Default::default()
-})?;
+fn main() -> Result<(), accretion_db::DbError> {
+    // GroupCommit: concurrent writers share one fsync per batch (the headline mode).
+    let db = Db::open("/tmp/mydb", Options {
+        durability: Durability::GroupCommit,
+        ..Default::default()
+    })?;
 
-db.put(b"key", b"value")?;                 // returns only once durable
-assert_eq!(db.get(b"key")?, Some(b"value".to_vec()));
+    db.put(b"key", b"value")?;                 // returns only once durable
+    assert_eq!(db.get(b"key")?, Some(b"value".to_vec()));
 
-db.delete(b"key")?;
-assert_eq!(db.get(b"key")?, None);
+    db.delete(b"key")?;
+    assert_eq!(db.get(b"key")?, None);
 
-// Range scan yields sorted (key, value) pairs, tombstone-aware:
-for (k, v) in db.scan(b"a".to_vec()..b"z".to_vec())? {
-    println!("{:?} => {:?}", k, v);
+    // Range scan yields sorted (key, value) pairs, tombstone-aware:
+    for (k, v) in db.scan(b"a".to_vec()..b"z".to_vec())? {
+        println!("{:?} => {:?}", k, v);
+    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 Run the crash sweep and the benchmarks yourself:
 
 ```sh
-# The crown jewel: every acked write survives every crash point (~3s).
+# Headline guarantee: every acked write survives every crash point (~3s).
 cargo test --release --test crash
 
-# Distinct-crash-point count that feeds the résumé (prints N=330 …):
+# Distinct-crash-point count (prints N=330 …):
 cargo test --release --test crash reports_crash_point_count -- --nocapture
 
 # Full benchmark matrix (regenerates benchmarks/raw/*, ~30 min):
@@ -257,7 +257,7 @@ Stated plainly, each on purpose:
 
 ## Documentation
 
-- [DESIGN_NOTES.md](DESIGN_NOTES.md) — interview-grade defense of every
+- [DESIGN_NOTES.md](DESIGN_NOTES.md) — the rationale behind every
   non-obvious choice: write/read path, group-commit math, torn-tail truncation,
   bloom sizing, tiered-vs-leveled, manifest atomicity, the concurrency model, and
   the crash evidence.

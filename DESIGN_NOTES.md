@@ -212,7 +212,7 @@ it (`tests/crash.rs`, `tests/process_kill.rs`):
    four fixed RNG seeds spanning the simulator's three tail outcomes (drop,
    torn-truncate, and bit-flip) and both durable modes, the engine crashes after op `i`,
    reopened, and verified against a model of the acknowledged prefix — 2 640 total
-   crash executions. This is the distinct-crash-point figure the résumé cites.
+   crash executions. This is the headline distinct-crash-point figure.
 
 2. **Property-based random schedules.** proptest generates random op sequences ×
    random crash fraction × random durable mode and model-verifies after recovery,

@@ -7,7 +7,7 @@
 //! table's data blocks entirely on a confident "absent", and only ever pays an
 //! unnecessary block read on the rarer false positive.
 //!
-//! # Sizing math (the interview-facing derivation)
+//! # Sizing math
 //!
 //! For a filter of `m` bits holding `n` keys with `k` hash functions, assuming
 //! independent uniform hashing, the probability a given bit is still `0` after

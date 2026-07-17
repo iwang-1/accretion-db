@@ -22,8 +22,8 @@
 //!    `tests/crash.proptest-regressions` for replay on later runs.
 //! 3. `tests/process_kill.rs` — the real SIGKILL integration test (RealFs).
 //!
-//! The count `N` and the seed multiplier are the distinct-crash-point figure the
-//! resume bullet cites; [`exhaustive::reports_crash_point_count`] prints them.
+//! The count `N` and the seed multiplier are the headline distinct-crash-point
+//! figure; [`exhaustive::reports_crash_point_count`] prints them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -296,8 +296,8 @@ mod exhaustive {
         );
     }
 
-    /// Emit the distinct-crash-point count and the variant multiplier for the
-    /// resume bullet / RESULTS.md. Not an assertion — a reporting harness.
+    /// Emit the distinct-crash-point count and the variant multiplier for
+    /// RESULTS.md. Not an assertion — a reporting harness.
     #[test]
     fn reports_crash_point_count() {
         let n = count_workload_ops(Durability::Always);

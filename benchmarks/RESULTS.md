@@ -144,7 +144,7 @@ bits/key, k = 7, 100,000 disjoint probes):
 Measured FPR sits just under theoretical, as expected for a well-mixed
 double-hashing filter.
 
-## 5. Crash-consistency counts (feed resume bullet 2)
+## 5. Crash-consistency counts
 
 From `tests/crash.rs` (run under `SimFs`, the deterministic power-loss simulator):
 

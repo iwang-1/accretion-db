@@ -18,7 +18,7 @@ one. Instead it will document a **harness validation**: deliberately remove one
 `fsync` (e.g. drop the WAL `sync_file` before ack), show the crash sweep catch
 the resulting acknowledged-write loss, then restore it. That entry will be
 labelled clearly as *validation of the harness*, never passed off as a bug the
-engine had — and the resume bullet's wording will match.
+engine had.
 
 ## Journal
 
