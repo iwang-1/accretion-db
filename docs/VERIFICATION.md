@@ -52,8 +52,12 @@ history contain no secrets, credentials, or internal identifiers.
 | §3a OsBuffered c=1 / c=8 / c=64 | 60,329 / 38,232 / 34,361 | **VERIFIED** (60329 / 38232 / 34361) |
 | §3b full-engine Always / OsBuffered c=64 | 341 / 17,342 | **VERIFIED** (medians 341 / 17342) |
 | §3c fill-seq GroupCommit c=8 / OsBuffered | 1,407 / 56,291 | **VERIFIED** (1407 / 56291) |
-| §4 scan 63/s, ≈31,500 pairs/s, p50 15.6 ms | **VERIFIED** | `raw/b3_scan.txt` 63 scans/s; 63 × 500 = 31,500; per-scan p50 ≈ 15.5 ms. |
-| §2 sync_all p99 2.78 ms, dir fsync 1.97 ms | **VERIFIED** | probe raws: sync_all p99 2.769–2.803; dir fsync p50 1.967–1.972. Spot re-run 2.86 ms / 2.02 ms — same order. |
+| §4 scan 63/s, ≈31,500 pairs/s, p50 15.6 ms | **VERIFIED, with the meaning corrected** | `raw/b3_scan.txt` 63 scans/s; 63 × 500 = 31,500; per-scan p50 ≈ 15.5 ms. A later audit established that `Db::scan` does **not** seek the sparse index — it decodes every block of every table and filters — so 15.6 ms is the cost of the whole data set, not of the 500-key window, and ≈31,500 is pairs *returned*/sec, not pairs examined. §4 and DESIGN_NOTES now state this and README *Limitations* lists it as a gap. |
+| §2 sync_all p99 2.78 ms, dir fsync p50 1.97 ms | **VERIFIED** | probe raws: sync_all p99 2.769–2.803 (median 2.780); dir fsync p50 1.967–1.972 (median 1.969). Spot re-run 2.86 ms / 2.02 ms — same order. |
+| §2 dir fsync p99 | **CORRECTED** | Was published as 2.14 ms; the probe raws give dir-fsync p99 = 2.142 / 2.112 / 2.101 ms, whose **median is 2.11 ms** (2.14 is the max of the three, not the median the table's own convention promises). Now 2.11 ms. |
+| §3a `OsBuffered` write p50 @ c=64 = "20 µs" | **CORRECTED** | The five `raw/b1_walbound_osbuffered_c64.txt` runs report p50s 16.2/16.2/16.6/17.0/17.1 µs → median **16.6 µs**, which rounds to 17 µs, not 20. Corrected in RESULTS §3a and the README table; the column's convention (median of the per-run p50s) is now stated explicitly. |
+| §3c fill-seq 50k "vs ~38k fill-random" | **CORRECTED** | The 38,232 peer is the §3a **WAL-bound** cell: 10,000 keys with a 64 MiB memtable that never flushes — a different workload size *and* memtable than the 50,000-key / 4 MiB fill-seq row, so the comparison overstated the sequential advantage (~1.5× vs ~1.06×). The matched peer is the fill-random fill phase of `raw/b2_pointread_c8.txt` (50k keys, 4 MiB, c=8), median of 5 = **53,186**. Corrected with the mismatch disclosed. |
+| §6 "sled's `flush()` pays a single fdatasync (~915 µs p50)" | **CORRECTED** | 915 µs appears in **no** committed artifact — no raw file contains it. `raw/sled_durable_c1.txt` reports per-run p50s 0.924/0.924/0.926/0.927/0.928 ms → median **926 µs**. Replaced with 926 µs (and accretion's matched 2.73 ms p50 from `raw/acc_durable_matched_c1.txt`), both traceable. Same sentence in the README corrected identically. |
 | §2 "earlier draft quoted 2.79 ms = sync_all p99" correction | **VERIFIED (honest)** | The correction is accurate and self-disclosed; git history (`5500b10 correct fsync latency figures`) confirms. |
 
 ## RESULTS.md §6 — sled baseline (matched durability, wins AND losses)
@@ -76,6 +80,15 @@ history contain no secrets, credentials, or internal identifiers.
 | Manifest tmp+fsync+rename+dir-fsync; readers pin `Arc<Version>`; GC when unreferenced | **VERIFIED** — `manifest.rs::install` + `Arc<Version>` model present. |
 | Concurrency: compaction **synchronous by design**, no background thread | **VERIFIED** — `grep` finds no `thread::spawn`/channel in `db.rs`/`compaction.rs`; `compaction.rs:1` documents it. NB: this is a documented deviation from spec stage S4 ("promote to background thread"), made and defended explicitly (commit `8ed058d`); README Limitations + DESIGN_NOTES Concurrency both disclose it as future work. Honest, not a false claim. |
 | Crash evidence: N=330, 2,640 executions, 160 proptest cases, positive control | **VERIFIED** — matches re-run counts; positive control described in BUGS_FOUND matches DESIGN_NOTES. |
+| Scan uses the sparse index | **REFUTED — docs corrected.** DESIGN_NOTES' read-path section described `scan` as "the same set of sources" as `get`, implying the same bloom/sparse-index shortcuts. `Db::scan` (`src/db.rs`) instead calls `SsTableReader::iter()` per table, which begins at block 0 and decodes every block (`src/sstable/reader.rs`), filtering to the range afterwards; it also never consults `key_in_range`. Measured: a 10-key window and a 5,000-key window over the same 50k-key DB both take ~14 ms. DESIGN_NOTES, RESULTS §4, and README *Limitations* now state the gap. |
+
+## Claims the docs *understated* (documentation drift, conservative direction)
+
+| Claim | Verdict |
+|---|---|
+| README: process kill = "1 single kill + 3 repeated rounds; progress floor enforced" | **UNDERSTATED — corrected.** `tests/process_kill.rs` does more than a progress floor: `run_one_kill` asserts each acked key is present *with its exact value*, requires `MIN_ACKNOWLEDGED_WRITES = 8` per round, and `repeated_sigkill_recovers_each_time` reuses **one directory** across all 3 kill/reopen cycles and then re-verifies every key acked in *any* round against the high-water mark. README and RESULTS §5 now say so. |
+| README: property layer = "160 schedules + 3 regressions" | **UNDERSTATED — corrected.** The 3 named regressions in `mod regressions` are not 3 executions: `sweep_ops` sweeps *every* crash point of each workload × 4 tear seeds × 2 durable modes. Measured N per workload = 151 / 232 / 108, i.e. 1,208 + 1,856 + 864 = **3,928 additional crash executions** beyond the headline 2,640. README now describes them as regression *sweeps*. |
+| RESULTS §5: invariant "asserted by `verify()`" | **UNDERSTATED — corrected.** `verify()` (`tests/crash.rs`) checks four things, not just value survival: the acked-prefix value bound per key, strictly-ascending `scan` order, absence of phantom keys, and `scan`/`get` agreement on liveness. §5 now enumerates them. |
 
 ## FORMAT.md
 

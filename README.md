@@ -71,9 +71,10 @@ produced on the disclosed build host. Nothing here is hand-tuned or aspirational
 A `put` is durable (per the configured mode) the instant it returns; the
 memtable insert, the size-triggered freeze, the flush to a tier-0 SSTable, and
 the manifest version bump all happen behind that contract. A `get` walks the
-active memtable, the frozen memtables, then the SSTable tiers newest-first — a
-bloom filter gates each table probe and a sparse index locates the one 4 KiB
-block that could hold the key. Full walkthrough in
+active memtable, the frozen memtables, then the SSTable tiers newest-first — the
+table's key range and its bloom filter gate each probe, and a sparse index locates
+the one 4 KiB block that could hold the key. (`scan` is correct but takes none of
+those shortcuts — see *Limitations*.) Full walkthrough in
 [DESIGN_NOTES.md](DESIGN_NOTES.md); on-disk byte layouts in [FORMAT.md](FORMAT.md).
 
 ## Quickstart
@@ -107,7 +108,8 @@ fn main() -> Result<(), accretion_db::DbError> {
 Run the crash sweep and the benchmarks yourself:
 
 ```sh
-# Headline guarantee: every acked write survives every crash point (~3s).
+# Headline guarantee: every acked write survives every crash point
+# (all 8 crash tests; well under a second on the disclosed host).
 cargo test --release --test crash
 
 # Distinct-crash-point count (prints N=330 …):
@@ -138,7 +140,7 @@ pipeline). Median of 5 runs:
 |---|---:|---:|---:|---:|
 | `Always` (fsync per put) | 369 | 348 | 276 | 3.7 ms |
 | `GroupCommit` (batched fsync) | 274 | 1,093 | **8,082** | 7.5 ms |
-| `OsBuffered` (no durability guarantee) | 60,329 | 38,232 | 34,361 | 20 µs |
+| `OsBuffered` (no durability guarantee) | 60,329 | 38,232 | 34,361 | 17 µs |
 
 **Group commit buys a ~29× multiplier** (8,082 / 276 at c=64) by trading
 same-concurrency p50 latency (3.7 ms → 7.5 ms) for batched fsync amortization —
@@ -158,9 +160,11 @@ figure is published side-by-side in RESULTS.md §3b, not hidden: the WAL-bound
 number proves the commit-pipeline design; the full-engine number is gated by the
 deliberately-simple compaction path.
 
-Point reads (warm page cache — the host has no root to drop caches, disclosed in
-RESULTS.md §4): **615,188 reads/sec, p50 11.7 µs, p99 21.7 µs**. Bloom filter
-FPR: **0.77 % measured** vs 0.82 % theoretical (10 bits/key, k=7).
+Point reads (50k keys, c=8, `OsBuffered`, post-flush so they hit SSTables; warm
+page cache — the host has no root to drop caches, disclosed in RESULTS.md §4):
+**615,188 reads/sec, p50 11.7 µs, p99 21.7 µs**. Bloom filter FPR: **0.77 %
+measured** vs 0.82 % theoretical (10 bits/key, k=7, n=10,000 keys, 100,000
+disjoint probes).
 
 ## Crash-consistency harness
 
@@ -174,8 +178,8 @@ truncates cleanly. Three independent layers test it:
 | layer | what it does | count |
 |---|---|---:|
 | Exhaustive deterministic sweep | Run a canonical mixed workload once to count `N` mutating storage ops; for each `i in 1..=N`, fresh `SimFs`, crash after op `i` (× 4 fixed seeds spanning 3 possible tear modes × 2 durable modes), reopen, verify against the acked-prefix model. | **330 points → 2,640 executions** |
-| Property-based schedules | proptest generates random op sequences × crash indices × durability modes, shrinking failures to minimal counterexamples; 3 named fixed-seed sweeps pin the highest-risk shapes as regressions. | **160 schedules + 3 regressions** |
-| Real process kill | `accretion-crashtest` writes to a real `RealFs` DB in `Always`, prints each key only once its `put` returns durable; the parent sends `SIGKILL`, reopens against real filesystem calls, and confirms every acknowledged key survived. The kernel and page cache remain alive, so this tests abrupt process death, not hardware power loss or torn writes. | **1 single kill + 3 repeated rounds; progress floor enforced; key counts vary with timing** |
+| Property-based schedules | proptest generates random op sequences × crash indices × durability modes, shrinking failures to minimal counterexamples; 3 named fixed-seed regressions pin the highest-risk shapes, and each one sweeps *every* crash point of its own workload × 4 seeds × 2 modes rather than running a single case. | **160 schedules + 3 regression sweeps** |
+| Real process kill | `accretion-crashtest` writes to a real `RealFs` DB in `Always`, prints each key only once its `put` returns durable; the parent sends `SIGKILL`, reopens against real filesystem calls, and confirms every acknowledged key is present *with its exact value*. The repeated test kills and reopens the **same directory** three times and, after the last round, re-verifies every key acked in *any* round — so recovery must hold across successive abrupt deaths. The kernel and page cache remain alive, so this tests abrupt process death, not hardware power loss or torn writes. | **1 single kill + 3 repeated rounds on one directory; ≥8 acked writes required per round; exact-value check; key counts vary with timing** |
 
 ### What `SimFs` models — and what it does not
 
@@ -206,14 +210,16 @@ every matched comparison**, reported plainly:
 
 | comparison | accretion-db | sled | winner |
 |---|---:|---:|---|
-| Durable (acc `Always` vs sled `insert`+`flush`) | 364 w/s | **1,070 w/s** | **sled (2.9×)** |
-| Buffered (acc `OsBuffered` vs sled no-flush) | 84,937 w/s | **217,719 w/s** | **sled (2.6×)** |
-| Buffered point reads | 615,188 r/s | **3,686,026 r/s** | **sled (6×)** |
+| Durable (acc `Always` vs sled `insert`+`flush`), fill-random 3k, c=1 | 364 w/s | **1,070 w/s** | **sled (2.9×)** |
+| Buffered (acc `OsBuffered` vs sled no-flush), fill-random 50k, c=1 | 84,937 w/s | **217,719 w/s** | **sled (2.6×)** |
+| Buffered point reads, 50k keys, c=8, warm page cache | 615,188 r/s | **3,686,026 r/s** | **sled (6×)** |
 
-Why, honestly: sled's `flush()` pays a single fdatasync right at the disk floor,
-while accretion's `Always` path includes WAL append/file-open work, one
-`sync_data`, and engine locking around each write. sled's lock-free architecture
-and years of tuning also beat this teaching-scale engine on reads. accretion-db's
+Why, honestly: sled's `insert`+`flush()` measures 926 µs p50 per write — within
+~5 % of this host's 878 µs `sync_data` p50, i.e. essentially just the one barrier —
+while accretion's `Always` measures 2.73 ms p50: the same single `sync_data` plus
+WAL append/file-open work and engine locking around each write. sled's lock-free
+architecture and years of tuning also beat this teaching-scale engine on reads.
+accretion-db's
 answer to the fsync wall is `GroupCommit`, which sled has no API for — so it is
 reported as accretion's own headline mode against its own `Always` baseline,
 never dressed up as a sled win. Methodology, matched configs, and the full table
@@ -251,6 +257,11 @@ Stated plainly, each on purpose:
   with range scans; no multi-key atomicity beyond a single `put`.
 - **No block cache / compression / `mmap` / `io_uring`.** Leans on the OS page
   cache by design; the point is the crash evidence, not squeezing the I/O path.
+- **`scan` does not seek the sparse index.** `get` uses the bloom filter and
+  sparse index to touch one 4 KiB block, but `scan` decodes every block of every
+  table and filters afterwards, so a narrow range costs the same as a full one
+  (RESULTS.md §4). Correct results, unoptimized cost; index-seeking scans are
+  future work.
 - **Single-host, single-process.** No network protocol, no multi-writer
   coordination. All benchmark numbers are single-host; the read numbers are
   warm-page-cache (no root to drop caches on the build host).

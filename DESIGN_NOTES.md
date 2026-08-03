@@ -71,6 +71,16 @@ is the same set of sources fed into a k-way **merge iterator** (`src/iter/`) tha
 yields keys in order, newest-wins per key, dropping tombstoned keys — verified
 against a `BTreeMap` reference model.
 
+**Scan does not use the sparse index (a known gap).** Unlike `get`, `Db::scan`
+walks each table with `SsTableReader::iter()`, which starts at block 0 and decodes
+every block, filtering entries to the range afterwards. It also does not use the
+per-table `[first_key, last_key]` range to skip non-overlapping tables. So a scan
+costs the whole data set regardless of how narrow the range is — measured in
+RESULTS.md §4, where a 500-key window over 50k keys takes 15.6 ms. Seeking the
+sparse index to the range's start block (and skipping tables out of range) is the
+obvious fix and is future work; the range-scan *semantics* are correct, only the
+cost is not.
+
 ## Group-commit math
 
 On a disk whose 4 KiB `fdatasync` costs ~878 µs p50 / ~975 µs p99 (measured on

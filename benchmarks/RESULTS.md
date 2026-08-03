@@ -35,7 +35,7 @@ iterations of a 4 KiB block, after 16 warmup iterations. Median across three run
 |---|---|---|---|
 | `sync_data` (fdatasync, 4 KiB) | **878 µs** | **975 µs** | what the WAL commit path pays per fsync |
 | `sync_all` (fsync, 4 KiB) | 889 µs | 2.78 ms | data + metadata; the heavy p99 tail |
-| dir fsync (rename durability) | 1.97 ms | 2.14 ms | what the manifest tmp+rename+dir-sync protocol pays |
+| dir fsync (rename durability) | 1.97 ms | 2.11 ms | what the manifest tmp+rename+dir-sync protocol pays |
 
 **Framing.** A durable `put` cannot return until its record is on stable storage,
 i.e. it pays at least one `fdatasync`. At 878 µs p50 that caps a *bare*
@@ -62,10 +62,10 @@ mode's fsync discipline. This is the regime the group-commit math describes.
 |---|---:|---:|---:|---:|
 | `Always` (fsync per put) | 369 | 348 | 276 | 3.7 ms |
 | `GroupCommit` (batched fsync) | 274 | 1,093 | **8,082** | 7.5 ms |
-| `OsBuffered` (no durability guarantee) | 60,329 | 38,232 | 34,361 | 20 µs |
+| `OsBuffered` (no durability guarantee) | 60,329 | 38,232 | 34,361 | 17 µs |
 
-throughput = writes/sec, median of 5 runs. Raw:
-[`raw/b1_walbound_*`](raw/).
+throughput = writes/sec, median of 5 runs; the `write p50 @ c=64` column is the
+median of the five runs' own p50s. Raw: [`raw/b1_walbound_*`](raw/).
 
 **Group-commit multiplier: 8,082 / 276 ≈ 29× at c=64**, bought by trading
 same-concurrency p50 latency (3.7 ms → 7.5 ms) for batched fsync amortization —
@@ -95,17 +95,24 @@ than hidden. Moving compaction to a background thread is documented future work.
 
 ### 3c. fill-seq (sequential keys)
 
-| workload | mode | throughput | note |
+| workload | mode | throughput | matched fill-random peer |
 |---|---|---:|---|
-| fill-seq, 10k, c=8, WAL-bound | `GroupCommit` | 1,407 | vs 1,093 fill-random — sorted inserts, same commit path |
-| fill-seq, 50k, c=8 | `OsBuffered` | 56,291 | vs ~38k fill-random c=8 — sequential build is friendlier |
+| fill-seq, 10k, c=8, WAL-bound (64 MiB memtable) | `GroupCommit` | 1,407 | 1,093 (§3a, same keys/memtable/c) — sorted inserts, same commit path |
+| fill-seq, 50k, c=8, default 4 MiB memtable | `OsBuffered` | 56,291 | 53,186 — sequential build is modestly friendlier |
 
-Raw [`raw/b1_fillseq_*`](raw/).
+Raw [`raw/b1_fillseq_*`](raw/). The second row's peer is the fill-random *fill
+phase* of [`raw/b2_pointread_c8.txt`](raw/), which is the only fill-random run at
+the same 50,000 keys, default 4 MiB memtable, and c=8 (median of 5 = 53,186). An
+earlier draft compared it to "~38k", which is the §3a **WAL-bound** cell — 10,000
+keys with a 64 MiB memtable that never flushes — a different workload *and* a
+different memtable, so that comparison overstated the sequential advantage
+(1.5× claimed vs 1.06× on matched settings). Corrected here.
 
 ## 4. Reads (B2) and scans (B3)
 
-**Point reads** (cold = post-flush, served from SSTables via bloom + sparse
-index, not the memtable), 50k keys, c=8, median of 5:
+**Point reads** (post-flush, so they are served from SSTables via bloom + sparse
+index, not the memtable — but see the warm-page-cache caveat below), 50k keys,
+c=8, `OsBuffered`, median of 5:
 
 | metric | value |
 |---|---:|
@@ -121,16 +128,25 @@ sparse-index + block-decode CPU path, *not* cold-disk read amplification. A true
 cold-disk read number would require a cache-drop this environment can't perform;
 that limitation is disclosed rather than papered over.
 
-**Forward scans** (500-key windows over 50k keys, single-threaded), median of 5:
+**Forward scans** (500-key windows over 50k keys, single-threaded, `OsBuffered`),
+median of 5:
 
 | metric | value |
 |---|---:|
 | scans/sec | 63 |
-| pairs visited/sec | ≈ 31,500 |
+| pairs *returned*/sec | ≈ 31,500 (63 × the 500-key window) |
 | per-scan p50 | 15.6 ms |
 
-Raw [`raw/b3_scan.txt`](raw/). Each scan is a k-way merge across the memtable and
-all SSTable tiers, materializing every pair in the window.
+Raw [`raw/b3_scan.txt`](raw/). **What this number actually measures.** `Db::scan`
+(`src/db.rs`) feeds a k-way merge from the memtables plus *every* SSTable, and for
+each table it walks `SsTableReader::iter()`, which starts at block 0 and decodes
+every block in the file (`src/sstable/reader.rs`), keeping only the entries inside
+the range. The scan path does **not** seek via the sparse index the way `get`
+does, so per-scan latency is set by the total size of all tables rather than by the
+window width — the 15.6 ms is the cost of decoding the whole 50k-key data set once
+per scan. The ≈31,500 figure is therefore pairs *returned* per second, not pairs
+examined, and it should not be read as a per-pair scan cost. An index-seeking scan
+is future work.
 
 **Bloom filter FPR (measured vs theoretical),** from
 `src/sstable/bloom.rs::measured_fpr_near_theoretical` (n = 10,000 keys, 10
@@ -158,10 +174,14 @@ From `tests/crash.rs` (run under `SimFs`, the deterministic power-loss simulator
 | named fixed-seed regression sweeps | 3 | `regressions` module (each sweeps every crash point × 4 seeds × 2 modes) |
 
 Every one recovers with **zero acknowledged-write loss** — the invariant asserted
-by `verify()`. The process-kill integration test (`tests/process_kill.rs`,
-RealFs + SIGKILL) adds one single-kill run and 3 repeated abrupt-process-death
-rounds with a minimum-progress assertion. Acknowledged-key counts are reported
-at runtime because they are timing-dependent.
+by `verify()`, which checks each key against the acked-prefix model, requires the
+`scan` to be strictly ascending, forbids phantom keys, and requires `scan` and
+`get` to agree on which keys are live. The process-kill integration test
+(`tests/process_kill.rs`, RealFs + SIGKILL) adds one single-kill run and 3
+repeated abrupt-process-death rounds against the same directory, each requiring
+≥8 acknowledged writes before the kill and checking exact values; after the last
+round it re-verifies every key acked in any round. Acknowledged-key counts are
+reported at runtime because they are timing-dependent.
 
 ## 6. sled baseline — matched durability (wins AND losses)
 
@@ -179,9 +199,11 @@ reported plainly:
 
 Raw: [`raw/sled_*`](raw/), [`raw/acc_*_matched_*`](raw/).
 
-**Why sled wins the durable row, honestly:** sled's `flush()` pays a single
-fdatasync (~915 µs p50, right at the disk's `sync_data` floor), while
-accretion-db's `Always` includes WAL append/file-open work, one `sync_data`, and
+**Why sled wins the durable row, honestly:** sled's `insert` + `flush()` measures
+**926 µs p50** per write (`raw/sled_durable_c1.txt`, median of the per-run p50s) —
+only ~5 % above this host's 878 µs `sync_data` p50 from §2, so nearly all of it is
+the one durability barrier. accretion-db's `Always` measures **2.73 ms p50** on the
+matched workload: the same single `sync_data` plus WAL append/file-open work and
 engine locking around each write. accretion-db's answer to the fsync wall is
 **`GroupCommit`**, which sled has no API for — so it is reported as accretion's
 own headline mode against its own `Always` baseline (§3a), never as a sled
