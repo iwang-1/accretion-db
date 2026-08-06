@@ -20,6 +20,7 @@ raw inputs. Where a result is *worse* than sled it is still published (see
 | Filesystem | ext4 on NVMe (`/dev/nvme0n1p1`, mounted `noatime`) |
 | Toolchain | rustc 1.95.0, `--release` (opt-level 3, `debug = true` for symbols) |
 | Data dir | fresh temp dir per run on the ext4 NVMe volume above |
+| Measured | **2026-07-13** (the date every raw run under `benchmarks/raw/` was captured on this host) |
 
 No page-cache dropping is performed (the host has no root); the read benchmarks
 are therefore **warm-page-cache** reads, disclosed as such in §4.
