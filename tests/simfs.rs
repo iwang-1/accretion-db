@@ -1,9 +1,5 @@
-//! `SimFs` behaviour tests that live at the integration level (they only touch
-//! the public [`Storage`] surface). The inline unit tests in `src/storage/sim.rs`
-//! cover the fine-grained buffered/durable/torn/rename cases; these focus on the
-//! property the crash sweep depends on above all else: **determinism**. Given a
-//! seed and an identical op sequence, the post-crash image — and its hash — is
-//! byte-for-byte reproducible, so a failing schedule can always be replayed.
+//! `SimFs` behaviour tests that live at the integration level (they only touch the public [`Storage`]
+//! surface).
 
 use std::path::{Path, PathBuf};
 
@@ -13,9 +9,8 @@ fn root() -> PathBuf {
     PathBuf::from("/d")
 }
 
-/// Run a fixed mixed workload against a fresh `SimFs`, crash after `crash_after`
-/// ops, and return a hash of the entire recovered namespace (every present
-/// file's path + bytes). Two runs with the same seed must return the same hash.
+/// Run a fixed mixed workload against a fresh `SimFs`, crash after `crash_after` ops, and return a hash of
+/// the entire recovered namespace (every present file's path + bytes).
 fn post_crash_hash(seed: u64, crash_after: u64) -> u64 {
     let fs = SimFs::with_seed(seed);
     fs.arm_crash_after(crash_after);
@@ -78,9 +73,7 @@ fn crash_is_deterministic_across_runs() {
     }
 }
 
-/// Different seeds should (at least sometimes) diverge on a torn tail — proving
-/// the RNG genuinely drives the tear decision rather than being ignored. We
-/// crash at a point where an unsynced tail exists and assert not all seeds agree.
+/// Different seeds should (at least sometimes) diverge on a torn tail.
 #[test]
 fn seed_influences_torn_tail() {
     // crash_after = 11 crashes with a's "-more" tail unsynced (the last append).

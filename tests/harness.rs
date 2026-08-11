@@ -1,13 +1,4 @@
-//! Crash-harness skeleton test — drives [`accretion_db::testkit`] against a
-//! **toy append-only store** so the harness itself is exercised end-to-end
-//! before the real LSM engine exists.
-//!
-//! The toy store is deliberately minimal but crash-*correct*: a single
-//! CRC32-framed, length-prefixed log with a torn-tail truncation recovery rule —
-//! the same discipline the real WAL will use. It is enough to prove the harness
-//! can (a) count a workload's storage ops, (b) crash at any chosen op, and
-//! (c) hand a recovered store to a verifier that distinguishes acknowledged
-//! writes (must survive) from unacknowledged ones (may vanish or tear).
+//! Crash-harness skeleton test.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,11 +26,8 @@ fn encode_frame(key: &[u8], value: &[u8]) -> Vec<u8> {
     frame
 }
 
-/// A toy append-only key/value store over the [`Storage`] seam.
-///
-/// `put` is durable-on-return: it appends a CRC frame and `sync_file`s before
-/// acknowledging, so any acked key must survive a crash. This is the property
-/// the harness verifies.
+/// A toy append-only key/value store over the [`Storage`] seam. `put` is durable-on-return: it appends a
+/// CRC frame and `sync_file`s before acknowledging, so any acked key must survive a crash.
 struct ToyStore {
     fs: Arc<dyn Storage>,
     log: PathBuf,
@@ -117,9 +105,8 @@ impl ToyStore {
     }
 }
 
-/// Sanity: the harness counts the same op total the workload actually issues.
-/// The workload below performs, per key: 1 append + 1 sync_file = 2 ops, plus
-/// the 3 setup ops (create + sync_file + sync_dir) on first open.
+/// Sanity: the harness counts the same op total the workload actually issues. The workload below performs,
+/// per key: 1 append + 1 sync_file = 2 ops, plus the 3 setup ops (create + sync_file + sync_dir) on first open.
 #[test]
 fn count_ops_matches_workload() {
     let n = count_ops(1, |fs| {
@@ -133,18 +120,8 @@ fn count_ops_matches_workload() {
     assert_eq!(n, 7);
 }
 
-/// The core harness invariant: exhaustively crash after every single storage op
-/// of a multi-put workload and confirm the recovered store is always *prefix-
-/// consistent*. Because each `put` syncs before returning, a key is
-/// "acknowledged" once its `sync_file` op completes. After a crash at any op:
-///
-/// * every key whose put fully completed (append + sync) before the crash is
-///   present with the exact value, and
-/// * the recovered key set is a prefix of the workload's key sequence — no
-///   phantom keys, no gaps.
-///
-/// This is the toy analogue of the engine's crash sweep: it proves the harness
-/// drives crash points 1..=N and that torn/dropped tails are handled.
+/// The core harness invariant: exhaustively crash after every single storage op of a multi-put workload and
+/// confirm the recovered store is always *prefix- consistent*.
 #[test]
 fn crash_sweep_is_prefix_consistent() {
     let keys: &[(&[u8], &[u8])] = &[
@@ -165,9 +142,8 @@ fn crash_sweep_is_prefix_consistent() {
     let verify = |fs: Arc<dyn Storage>, _report: &_| {
         let dir = PathBuf::from("/db");
         let (_store, recovered) = ToyStore::open(fs, &dir);
-        // The recovered keys must be a prefix of the workload's key order, each
-        // with its correct value: this rejects phantom keys, reordering, and
-        // partial/torn frames that slipped past the CRC check.
+        // The recovered keys must be a prefix of the workload's key order, each with its correct value:
+        // this rejects phantom keys, reordering, and partial/torn frames that slipped past the CRC check.
         let mut expected = recovered.len();
         for (k, v) in keys.iter().take(recovered.len()) {
             assert_eq!(
@@ -211,9 +187,7 @@ fn acked_put_survives_crash() {
     );
 }
 
-/// An un-acked put — crashed *after the append but before the sync* — must never
-/// leave a half-valid frame that recovery accepts. Whatever survives is either
-/// nothing or a clean prefix; the CRC/length rule rejects the torn frame.
+/// An un-acked put.
 #[test]
 fn unacked_put_never_half_applies() {
     // 3 setup ops, then append (op 4), then sync (op 5). Crash after op 4: the
@@ -229,10 +203,7 @@ fn unacked_put_never_half_applies() {
         |fs, _report| {
             let dir = PathBuf::from("/db");
             let (_store, recovered) = ToyStore::open(fs, &dir);
-            // The un-acked key must NOT reappear with a wrong value. Either it is
-            // absent (dropped/torn) or — if the tail happened to be fully synced
-            // by the file-length model — present with the exact value; a corrupt
-            // partial frame must be rejected outright.
+            // The un-acked key must not reappear with a wrong value.
             match recovered.get(b"maybe".as_slice()) {
                 None => {}
                 Some(v) => assert_eq!(v.as_slice(), b"lost"),

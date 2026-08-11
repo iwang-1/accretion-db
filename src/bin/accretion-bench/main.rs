@@ -1,34 +1,4 @@
-//! `accretion-bench` — the closed-loop throughput/latency driver.
-//!
-//! Runs one of the spec's workloads (`fill-random`, `fill-seq`, `point-read`,
-//! `scan`) against accretion-db in a chosen [`Durability`] mode — and, when
-//! built with `--features bench-sled`, against the matched sled baseline — over
-//! a real filesystem directory, reporting aggregate throughput and p50/p99/max
-//! latency from an exact histogram.
-//!
-//! This binary is the *throughput* tool; criterion (see `benches/hot_paths.rs`)
-//! is the *single-op latency distribution* tool. The full measurement matrix and
-//! the numbers that fill the resume `{MEASURE:}` placeholders are produced in
-//! stage S6 by driving this binary; this stage only builds and smoke-tests it.
-//!
-//! # Usage
-//!
-//! ```text
-//! accretion-bench <workload> [options]
-//!   workloads: fill-random | fill-seq | point-read | scan | all
-//!   --engine <accretion|sled>     default accretion
-//!   --durability <always|group|osbuffered>   default group  (accretion only)
-//!   --keys <N>                    number of keys           default 100000
-//!   --reads <N>                   point-read / scan count  default = keys
-//!   --concurrency <N>             worker threads           default 1
-//!   --memtable-bytes <N>          memtable freeze size     default 4194304
-//!   --dir <path>                  data dir (default: a fresh temp dir)
-//!   --seed <N>                    RNG seed                 default 0x5eed
-//! ```
-//!
-//! The sled engine ignores `--durability`: it always uses its matched config
-//! (durable = insert+flush) unless `--durability osbuffered` selects the
-//! buffered (no-flush) shim. See `kv.rs` for the matched-durability rationale.
+//! `accretion-bench`
 
 mod hist;
 mod kv;
@@ -169,11 +139,8 @@ fn main() -> std::process::ExitCode {
 fn run(args: &[String]) -> BenchResult<()> {
     let cfg = parse_args(args)?;
 
-    // Resolve the data directory. A caller-supplied --dir is used as-is; else a
-    // fresh, uniquely-named dir under the system temp root keeps runs isolated.
-    // (We avoid the tempfile crate here — it is a dev-dependency and not
-    // available to `[[bin]]` targets; a pid+seed name is unique enough for a
-    // benchmark scratch dir.)
+    // Resolve the data directory. A caller-supplied --dir is used as-is; else a fresh, uniquely-named dir
+    // under the system temp root keeps runs isolated.
     let dir = match cfg.dir.clone() {
         Some(d) => d,
         None => {
@@ -318,10 +285,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    //! HARNESS-FIRST smoke: drive the full fill -> flush -> point-read -> scan
-    //! pipeline over a deterministic in-memory [`SimFs`], so the driver, the
-    //! KvBench shim, and every runner phase are exercised under the fault
-    //! seam — no disk, fast, and reproducible — before anything relies on it.
+    //! Harness-first smoke: drive the full fill -> flush -> point-read -> scan pipeline over a
+    //! deterministic in-memory [`SimFs`], so the driver, the KvBench shim, and every runner phase are exercised under the fault.
 
     use super::*;
     use accretion_db::{SimFs, Storage};

@@ -1,10 +1,5 @@
-//! End-to-end engine tests: the public [`Db`] API driven over both the
-//! deterministic `SimFs` and the real filesystem, exercising the full write path
-//! (WAL → memtable → freeze/flush → SSTable + manifest → compaction) and the read
-//! path through the merge iterator.
-//!
-//! These are correctness (not crash) tests; the exhaustive crash sweep and
-//! property-based crash schedules land in the dedicated crash suite.
+//! End-to-end engine tests: the public [`Db`] API driven over both the deterministic `SimFs` and the real
+//! filesystem, exercising the full write path.
 
 use std::path::PathBuf;
 use std::sync::Arc;

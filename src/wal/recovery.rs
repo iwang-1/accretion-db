@@ -1,19 +1,5 @@
-//! WAL recovery: replay durable records and locate the clean truncation point.
-//!
-//! Recovery reads each segment in id order and decodes frames back-to-back.
-//! The **torn-tail rule** (see `DESIGN_NOTES.md`) governs where replay stops:
-//! the scan halts at the first frame that is short (truncated) or fails its
-//! CRC, discarding that frame and everything after it.
-//!
-//! Why this cannot lose acknowledged data: in a durable mode (`Always` /
-//! `GroupCommit`) a write is only acked *after* its frame has been `sync_file`d,
-//! so every acked frame precedes the torn tail and decodes cleanly. Only
-//! unsynced (therefore never-acked) tail bytes are ever discarded.
-//!
-//! A crash can only tear the *most recent* unsynced append, which lives in the
-//! last segment. Earlier segments are fully durable, so a decode failure there
-//! would indicate real corruption; recovery still stops at the first bad frame
-//! (conservative and safe) and records where.
+//! WAL recovery: replay durable records and locate the clean truncation point. Recovery reads each segment
+//! in id order and decodes frames back-to-back.
 
 use std::path::{Path, PathBuf};
 
@@ -41,17 +27,15 @@ pub struct Recovered {
     /// The id of the segment where scanning stopped (the tail segment), if any
     /// segments existed.
     pub tail_segment: Option<u64>,
-    /// The byte offset within [`tail_segment`](Recovered::tail_segment) of the
-    /// first byte that is *not* part of a valid record — i.e. the length the
-    /// tail segment should be truncated to so it holds only clean frames.
+    /// The byte offset within [`tail_segment`](Recovered::tail_segment) of the first byte that is *not*
+    /// part of a valid record — i.e. the length the tail segment should be truncated to so it holds only clean frames.
     pub tail_valid_len: u64,
     /// Why the scan of the tail segment stopped.
     pub stop_reason: StopReason,
 }
 
-/// Scan a single already-read segment buffer, appending decoded payloads to
-/// `out`. Returns `(valid_len, stop_reason)` where `valid_len` is the offset of
-/// the first byte past the last cleanly-decoded frame.
+/// Scan a single already-read segment buffer, appending decoded payloads to `out`. Returns `(valid_len,
+/// stop_reason)` where `valid_len` is the offset of the first byte past the last cleanly-decoded frame.
 fn scan_buffer(buf: &[u8], out: &mut Vec<Vec<u8>>) -> (u64, StopReason) {
     let mut off = 0usize;
     loop {
@@ -69,9 +53,8 @@ fn scan_buffer(buf: &[u8], out: &mut Vec<Vec<u8>>) -> (u64, StopReason) {
     }
 }
 
-/// Replay every WAL segment under `dir` in id order, applying the torn-tail
-/// rule. Records from all fully-clean leading segments plus the clean prefix of
-/// the final segment are returned in order.
+/// Replay every WAL segment under `dir` in id order, applying the torn-tail rule. Records from all
+/// fully-clean leading segments plus the clean prefix of the final segment are returned in order.
 pub fn recover(fs: &dyn Storage, dir: &Path) -> StorageResult<Recovered> {
     let segments = segment::list_segments(fs, dir)?;
     let mut result = Recovered::default();
@@ -89,9 +72,7 @@ pub fn recover(fs: &dyn Storage, dir: &Path) -> StorageResult<Recovered> {
         result.stop_reason = reason;
 
         let is_last = idx + 1 == segments.len();
-        // If a non-final segment stops early, the tail it produced is where the
-        // log truly ends — later segments are unreachable, so stop here. (In
-        // normal operation only the final segment is ever partial.)
+        // If a non-final segment stops early, the tail it produced is where the log truly ends.
         if reason != StopReason::Clean {
             let _ = before; // records already pushed are the valid prefix
             break;
@@ -104,14 +85,8 @@ pub fn recover(fs: &dyn Storage, dir: &Path) -> StorageResult<Recovered> {
     Ok(result)
 }
 
-/// Truncate the tail segment to its valid length, physically discarding a torn
-/// or corrupt tail so future appends land at a clean boundary.
-///
-/// The [`Storage`] seam grows files by `append` only, so "truncation" is
-/// modeled by rewriting the segment to its valid prefix via a
-/// tmp-write + rename, then syncing the directory. This keeps the operation
-/// crash-safe: a crash mid-truncate leaves either the old (torn-tail) segment
-/// or the clean rewritten one, and re-running recovery converges either way.
+/// Truncate the tail segment to its valid length, physically discarding a torn or corrupt tail so future
+/// appends land at a clean boundary.
 pub fn truncate_tail(
     fs: &dyn Storage,
     dir: &Path,

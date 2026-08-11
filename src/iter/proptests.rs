@@ -1,15 +1,13 @@
-//! Property-based merge correctness: random write sequences (puts, overwrites,
-//! deletes, resurrections) distributed across a random number of sources must
-//! produce exactly the live scan a flat `BTreeMap` reference model computes.
+//! Property-based merge correctness: random write sequences (puts, overwrites, deletes, resurrections)
+//! distributed across a random number of sources must produce exactly the live scan a flat `BTreeMap` reference.
 
 use super::*;
 use crate::memtable::{InternalValue, ValueKind};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
-/// One generated write. `seq` is assigned deterministically by position at
-/// apply time (writes[i] gets seq = i + 1), so overwrites and deletes to the
-/// same key have a well-defined newest.
+/// One generated write. `seq` is assigned deterministically by position at apply time (writes[i] gets seq =
+/// i + 1), so overwrites and deletes to the same key have a well-defined newest.
 #[derive(Clone, Debug)]
 enum Op {
     Put(u8, Vec<u8>),

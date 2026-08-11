@@ -1,17 +1,4 @@
 //! Criterion micro-benchmarks for accretion-db's hot paths.
-//!
-//! Criterion is the *single-op latency distribution* tool (statistical timing of
-//! one operation in isolation); the closed-loop `accretion-bench` binary is the
-//! *aggregate throughput under load* tool. This file measures the in-memory hot
-//! paths that sit under every read and write and never touch the disk, so their
-//! cost is not masked by fsync latency:
-//!
-//! * bloom filter `insert` and `contains` (hit + miss) — gates every table probe;
-//! * memtable `insert` and `get` — the front of the write and read paths.
-//!
-//! CI runs these with `--bench hot_paths -- --test` (a smoke pass that executes
-//! each bench once and asserts nothing about absolute numbers). Real numbers, if
-//! ever quoted, come from the S6 host run.
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 

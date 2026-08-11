@@ -1,14 +1,5 @@
-//! WAL segment files: naming, creation, and the thin per-file append/sync
-//! operations the commit pipeline drives.
-//!
-//! The log is split into monotonically numbered segment files so that once a
-//! memtable flush has captured every record up to some point, the whole
-//! prefix of segments covering those records can be deleted in one step
-//! ("segment release") rather than rewriting a single ever-growing file.
-//!
-//! A segment is named `<id>.wal` with a zero-padded, lexicographically-sortable
-//! id, so a plain sorted `list` of the directory yields segments in write
-//! order.
+//! WAL segment files: naming, creation, and the thin per-file append/sync operations the commit pipeline
+//! drives.
 
 use std::path::{Path, PathBuf};
 
@@ -36,10 +27,8 @@ pub(crate) fn parse_segment_id(path: &Path) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
-/// List every WAL segment in `dir`, returning `(id, path)` pairs sorted by id.
-///
-/// Non-segment files in the directory (e.g. a manifest, or a `.tmp` rewrite in
-/// progress) are ignored.
+/// List every WAL segment in `dir`, returning `(id, path)` pairs sorted by id. Non-segment files in the
+/// directory (e.g. a manifest, or a `.tmp` rewrite in progress) are ignored.
 pub(crate) fn list_segments(fs: &dyn Storage, dir: &Path) -> StorageResult<Vec<(u64, PathBuf)>> {
     let mut out: Vec<(u64, PathBuf)> = fs
         .list(dir)?
@@ -50,10 +39,8 @@ pub(crate) fn list_segments(fs: &dyn Storage, dir: &Path) -> StorageResult<Vec<(
     Ok(out)
 }
 
-/// A handle to one open, writable segment file.
-///
-/// Tracks the id, path, and the current write offset (the file's length as far
-/// as this process is concerned) so appends know where the next frame lands.
+/// A handle to one open, writable segment file. Tracks the id, path, and the current write offset (the
+/// file's length as far as this process is concerned) so appends know where the next frame lands.
 #[derive(Debug)]
 pub(crate) struct Segment {
     id: u64,
@@ -63,10 +50,8 @@ pub(crate) struct Segment {
 }
 
 impl Segment {
-    /// Create a brand-new, empty segment file `<id>.wal` in `dir`.
-    ///
-    /// The file's directory entry is not durable until the caller `sync_dir`s
-    /// the parent (the pipeline does this on open and on rotation).
+    /// Create a brand-new, empty segment file `<id>.wal` in `dir`. The file's directory entry is not
+    /// durable until the caller `sync_dir`s the parent (the pipeline does this on open and on rotation).
     pub(crate) fn create(fs: &dyn Storage, dir: &Path, id: u64) -> StorageResult<Segment> {
         let path = segment_path(dir, id);
         fs.create(&path)?;
@@ -105,9 +90,8 @@ impl Segment {
         self.write_offset
     }
 
-    /// Append an already-encoded frame's bytes, advancing the write offset.
-    ///
-    /// The bytes are buffered (not durable) until [`sync`](Segment::sync).
+    /// Append an already-encoded frame's bytes, advancing the write offset. The bytes are buffered (not
+    /// durable) until [`sync`](Segment::sync).
     pub(crate) fn append(&mut self, fs: &dyn Storage, bytes: &[u8]) -> StorageResult<()> {
         let at = fs.append(&self.path, bytes)?;
         debug_assert_eq!(at, self.write_offset, "append landed at unexpected offset");

@@ -1,31 +1,4 @@
-//! [`SimFs`] — the deterministic power-loss simulator.
-//!
-//! `SimFs` is the heart of the crash-consistency harness. It implements the
-//! same [`Storage`](super::Storage) trait as [`RealFs`](super::RealFs), but
-//! instead of talking to the kernel it maintains an in-memory *page-cache
-//! model*:
-//!
-//! * Every mutating byte range is **buffered** (visible to this process) until a
-//!   covering [`sync_file`](Storage::sync_file) promotes it to **durable**.
-//! * A [`rename`](Storage::rename) / [`create`](Storage::create) /
-//!   [`delete`](Storage::delete) is likewise **volatile** — visible now, but the
-//!   directory-entry change does not survive a crash until a
-//!   [`sync_dir`](Storage::sync_dir) on the parent directory.
-//! * [`crash`](SimFs::crash) discards everything that has not been made durable
-//!   and, per a seeded [`StdRng`], **tears** the most recent unsynced append at
-//!   a random byte boundary (or drops it, or flips a bit inside it). Given the
-//!   seed the outcome is fully deterministic and reproducible.
-//!
-//! A monotonic op counter lets the future exhaustive sweep arm a crash *after
-//! op #i* deterministically ([`arm_crash_after`](SimFs::arm_crash_after)).
-//!
-//! # What is modelled — and what is not
-//!
-//! Modelled: loss of unsynced data, a torn/dropped unsynced append, and a
-//! volatile directory entry that reverts to its last durably-synced name. **Not**
-//! modelled: cross-file sector reordering, partial-sector atomicity below the
-//! byte level, or media decay of already-durable data. The engine is only ever
-//! allowed to depend on the guarantees this model makes.
+//! [`SimFs`]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -36,10 +9,8 @@ use rand::{Rng, SeedableRng};
 
 use super::{Storage, StorageError, StorageResult};
 
-/// How a crash mangles the most recent unsynced append.
-///
-/// The variant chosen for a given crash is decided by the seeded RNG and
-/// reported in the [`CrashReport`].
+/// How a crash mangles the most recent unsynced append. The variant chosen for a given crash is decided by
+/// the seeded rng and reported in the [`CrashReport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TearMode {
     /// The unsynced tail is dropped in full (the file reverts to its last
@@ -62,10 +33,6 @@ pub struct SimConfig {
 }
 
 /// A summary of what a simulated [`crash`](SimFs::crash) did.
-///
-/// Everything here is a deterministic function of the [`SimConfig::seed`] and
-/// the exact sequence of operations that preceded the crash, so a failing crash
-/// schedule can be replayed byte-for-byte.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CrashReport {
     /// Number of mutating storage ops observed before the crash.
@@ -76,9 +43,8 @@ pub struct CrashReport {
     pub tear_mode: TearMode,
     /// Length of the unsynced tail that existed at crash time (bytes).
     pub tail_len: u64,
-    /// How many bytes of that tail survived the crash (bytes). Equal to
-    /// `tail_len` for [`TearMode::BitFlip`], `0` for [`TearMode::Drop`], and a
-    /// random prefix for [`TearMode::Truncate`].
+    /// How many bytes of that tail survived the crash (bytes). Equal to `tail_len` for
+    /// [`TearMode::BitFlip`], `0` for [`TearMode::Drop`], and a random prefix for [`TearMode::Truncate`].
     pub tail_kept: u64,
 }
 
@@ -94,9 +60,8 @@ struct InodeState {
     last_append_seq: Option<u64>,
 }
 
-/// The two namespace images for a path. A delete followed by a recreate can
-/// point `live_inode` at a new generation while `durable_inode` still points at
-/// the old one until the parent directory is synced.
+/// The two namespace images for a path. A delete followed by a recreate can point `live_inode` at a new
+/// generation while `durable_inode` still points at the old one until the parent directory is synced.
 #[derive(Debug, Clone, Default)]
 struct PathState {
     /// Inode generation visible to the running process.
@@ -126,11 +91,8 @@ struct SimState {
     rng: StdRng,
 }
 
-/// A deterministic, seeded power-loss simulator implementing [`Storage`].
-///
-/// Cheap to construct and `Send + Sync`; share it as `Arc<dyn Storage>` exactly
-/// like [`RealFs`](super::RealFs). See the [module docs](self) for the fault
-/// model.
+/// A deterministic, seeded power-loss simulator implementing [`Storage`]. Cheap to construct and `Send +
+/// Sync`; share it as `Arc<dyn Storage>` exactly like [`RealFs`](super::RealFs).
 #[derive(Debug)]
 pub struct SimFs {
     state: Mutex<SimState>,
@@ -166,25 +128,20 @@ impl Default for SimFs {
 }
 
 impl SimFs {
-    /// Number of mutating ops applied so far. `sync_file`/`sync_dir` count too:
-    /// they are durability barriers the sweep may want to crash immediately
-    /// after.
+    /// Number of mutating ops applied so far. `sync_file`/`sync_dir` count too: they are durability
+    /// barriers the sweep may want to crash immediately after.
     pub fn op_count(&self) -> u64 {
         self.state.lock().expect("simfs poisoned").op_count
     }
 
-    /// Arm an automatic [`crash`](SimFs::crash) to fire the instant `op_count`
-    /// reaches `n`. This is the deterministic "crash after op #n" hook the
-    /// exhaustive sweep drives. Passing an already-reached `n` fires on the next
-    /// mutating op; the arm is one-shot and disarms itself when it fires.
+    /// Arm an automatic [`crash`](SimFs::crash) to fire the instant `op_count` reaches `n`. This is the
+    /// deterministic "crash after op #n" hook the exhaustive sweep drives.
     pub fn arm_crash_after(&self, n: u64) {
         self.state.lock().expect("simfs poisoned").crash_after = Some(n);
     }
 
-    /// The [`CrashReport`] from the most recent [`crash`](SimFs::crash), if one
-    /// has occurred (including one fired by [`arm_crash_after`]).
-    ///
-    /// [`arm_crash_after`]: SimFs::arm_crash_after
+    /// The [`CrashReport`] from the most recent [`crash`](SimFs::crash), if one has occurred (including one
+    /// fired by [`arm_crash_after`]). [`arm_crash_after`]: SimFs::arm_crash_after.
     pub fn last_report(&self) -> Option<CrashReport> {
         self.state
             .lock()
@@ -193,31 +150,20 @@ impl SimFs {
             .clone()
     }
 
-    /// Simulate a power loss: discard all buffered (unsynced) state, revert the
-    /// namespace to its last durably-synced image, and tear the most recent
-    /// unsynced append per the seeded RNG. Returns a [`CrashReport`] describing
-    /// exactly what happened, which is also stored for [`last_report`].
-    ///
-    /// After this returns, `SimFs` is in the state a freshly rebooted machine
-    /// would see: reads observe only what survived. It is deterministic given
-    /// the seed and the preceding op sequence.
-    ///
-    /// [`last_report`]: SimFs::last_report
+    /// Simulate a power loss: discard all buffered (unsynced) state, revert the namespace to its last
+    /// durably-synced image, and tear the most recent unsynced append per the seeded rng.
     pub fn crash(&self) -> CrashReport {
         let mut st = self.state.lock().expect("simfs poisoned");
         Self::crash_locked(&mut st)
     }
 
-    /// The crash mechanism, operating on already-locked state so it can be
-    /// invoked both from [`crash`](SimFs::crash) and from the armed auto-crash
-    /// hook without re-locking.
+    /// The crash mechanism, operating on already-locked state so it can be invoked both from
+    /// [`crash`](SimFs::crash) and from the armed auto-crash hook without re-locking.
     fn crash_locked(st: &mut SimState) -> CrashReport {
         let ops_before_crash = st.op_count;
 
-        // Identify the tear target: the most recent append, but only if its
-        // file will still exist on disk (its directory entry is durable) and it
-        // actually carries unsynced tail bytes. A file whose create was never
-        // dir-synced vanishes wholesale — there is no torn tail to model.
+        // Identify the tear target: the most recent append, but only if its file will still exist on disk
+        // (its directory entry is durable) and it actually carries unsynced tail bytes.
         let mut report = CrashReport {
             ops_before_crash,
             ..Default::default()
@@ -298,11 +244,8 @@ impl SimFs {
         report
     }
 
-    /// Count one mutating op and, if an [`arm_crash_after`](SimFs::arm_crash_after)
-    /// threshold has now been reached, fire the crash immediately. Called at the
-    /// end of every mutating [`Storage`] method after its effect is applied, so
-    /// "crash after op #n" means op #n's effect existed in the page cache the
-    /// instant power was lost.
+    /// Count one mutating op and, if an [`arm_crash_after`](SimFs::arm_crash_after) threshold has now been
+    /// reached, fire the crash immediately.
     fn bump(st: &mut SimState) {
         st.op_count += 1;
         if matches!(st.crash_after, Some(n) if st.op_count >= n) {
@@ -341,9 +284,8 @@ impl Storage for SimFs {
         let inode_id = st.next_inode;
         st.next_inode += 1;
         st.inodes.insert(inode_id, InodeState::default());
-        // Keep any old durable directory entry intact. The new generation is
-        // process-visible immediately but replaces the old one durably only
-        // after a parent-directory sync.
+        // Keep any old durable directory entry intact. The new generation is process-visible immediately
+        // but replaces the old one durably only after a parent-directory sync.
         st.files.entry(path.to_path_buf()).or_default().live_inode = Some(inode_id);
         Self::bump(&mut st);
         Ok(())
@@ -568,9 +510,7 @@ mod tests {
         assert!(survived.len() <= b"durable-buffered".len());
     }
 
-    /// A `Truncate` crash keeps a prefix of the unsynced tail — the torn-write
-    /// case a CRC-framed WAL must detect and truncate. We search seeds for a
-    /// deterministic Truncate outcome and verify the survivor is a clean prefix.
+    /// A `Truncate` crash keeps a prefix of the unsynced tail.
     #[test]
     fn torn_append_keeps_prefix() {
         // Find a seed that yields a partial (non-empty, non-full) truncation.
@@ -617,11 +557,7 @@ mod tests {
     }
 
     /// An atomic replace over an *already-durable* file (the manifest's
-    /// tmp+sync_file+rename-over-`MANIFEST`+sync_dir protocol) must, after a crash
-    /// following the `sync_dir`, durably resolve to the NEW content — not revert
-    /// to the old durable image. This is the POSIX guarantee the manifest relies
-    /// on; SimFs once under-modeled it and the crash sweep exposed the resulting
-    /// false acknowledged-write loss (see `BUGS_FOUND.md`).
+    /// tmp+sync_file+rename-over-`manifest`+sync_dir protocol) must, after a crash following the `sync_dir`, durably resolve to the new content — not.
     #[test]
     fn rename_over_durable_file_commits_new_content_on_dir_sync() {
         let fs = SimFs::with_seed(1);
@@ -646,9 +582,8 @@ mod tests {
         assert_eq!(read_all(&fs, &man), b"VERSION-2222");
     }
 
-    /// A rename-over-durable that crashes *before* the committing `sync_dir`
-    /// reverts the destination to its old durable content — the replace never
-    /// happened.
+    /// A rename-over-durable that crashes *before* the committing `sync_dir` reverts the destination to its
+    /// old durable content — the replace never happened.
     #[test]
     fn rename_over_durable_reverts_if_crash_before_dir_sync() {
         let fs = SimFs::with_seed(1);
@@ -685,9 +620,8 @@ mod tests {
         assert_eq!(read_all(&fs, &a), b"payload");
     }
 
-    /// Syncing a directory commits the file name, not its buffered payload.
-    /// After a crash the path therefore remains, while the payload is still
-    /// treated as an unsynced tail rather than silently promoted to durable.
+    /// Syncing a directory commits the file name, not its buffered payload. After a crash the path
+    /// therefore remains, while the payload is still treated as an unsynced tail rather than silently promoted to durable.
     #[test]
     fn dir_sync_commits_name_but_not_unsynced_bytes() {
         let fs = SimFs::with_seed(11);

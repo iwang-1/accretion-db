@@ -1,18 +1,4 @@
-//! [`RealFs`] — the production [`Storage`] backend over `std::fs`.
-//!
-//! Every durability barrier maps onto a real kernel primitive:
-//!
-//! * `sync_file` → [`File::sync_data`] (`fdatasync`): flush the file's data
-//!   (and the metadata strictly required to read it back) to stable storage.
-//! * `sync_dir` → open the directory as a file and [`File::sync_all`] it. On
-//!   Unix this fsyncs the directory inode, which is what makes a preceding
-//!   `rename`/`create`/`delete` durable. Without it the directory entry can be
-//!   lost across a power cut even though the file's data survived.
-//!
-//! There is deliberately no per-file caching here: each call opens, seeks, acts
-//! and closes. The engine batches at a higher level (the WAL commit pipeline),
-//! and keeping this layer stateless keeps its behaviour trivially comparable to
-//! `SimFs`.
+//! [`RealFs`]
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -25,9 +11,8 @@ use super::{Storage, StorageError, StorageResult};
 pub struct RealFs;
 
 impl RealFs {
-    /// Construct a `RealFs`. It holds no state; all paths are absolute or
-    /// relative to the process working directory, exactly as `std::fs` treats
-    /// them.
+    /// Construct a `RealFs`. It holds no state; all paths are absolute or relative to the process working
+    /// directory, exactly as `std::fs` treats them.
     pub fn new() -> Self {
         RealFs
     }
@@ -123,10 +108,8 @@ impl Storage for RealFs {
     }
 
     fn sync_dir(&self, dir: &Path) -> StorageResult<()> {
-        // On Unix, opening a directory read-only and fsyncing its handle makes
-        // pending directory-entry changes (rename/create/delete) durable. This
-        // is the step that turns a "visible" rename into a "survives-power-loss"
-        // rename.
+        // On Unix, opening a directory read-only and fsyncing its handle makes pending directory-entry
+        // changes (rename/create/delete) durable.
         let f = File::open(dir).map_err(|e| map_io(dir, e))?;
         f.sync_all().map_err(|e| map_io(dir, e))
     }
@@ -162,10 +145,8 @@ impl Storage for RealFs {
 mod tests {
     use super::*;
 
-    /// End-to-end round-trip: create → append → read_at, then exercise the
-    /// positional-write, rename, list, len, and durability-barrier paths so the
-    /// production backend is genuinely driven (not just referenced) even before
-    /// the engine exists. All under a `tempfile` dir so nothing leaks.
+    /// End-to-end round-trip: create → append → read_at, then exercise the positional-write, rename, list,
+    /// len, and durability-barrier paths so the production backend is genuinely driven (not just referenced) even.
     #[test]
     fn realfs_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");

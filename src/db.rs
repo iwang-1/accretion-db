@@ -1,33 +1,5 @@
-//! The public engine: [`Db`], wiring the WAL, memtable, SSTable tiers, manifest,
-//! and compaction into one embeddable key/value store.
-//!
-//! # Write path
-//!
-//! `put`/`delete` run under a single write mutex (the deliberate single-writer
-//! model — see `DESIGN_NOTES.md`):
-//!
-//! 1. assign the next global sequence number;
-//! 2. append a framed `(seq, key, value)` record to the [WAL](crate::wal), which
-//!    does not return until the configured [`Durability`] contract is met — so a
-//!    durable-mode `put` is crash-safe the instant it returns;
-//! 3. insert the value into the active memtable;
-//! 4. if the active memtable is now full, *freeze* it and *flush* it: write a new
-//!    tier-0 SSTable, install a new manifest version, then release the WAL. A
-//!    cascading size-tiered compaction runs synchronously afterwards.
-//!
-//! The flush ordering — SSTable durable, *then* manifest install, *then* WAL
-//! reset — is what makes a crash at any point recoverable: an SSTable not yet
-//! referenced by the manifest is GC'd, and WAL records not yet flushed are
-//! replayed; nothing acked is ever lost, and a replayed-and-also-flushed record
-//! de-duplicates by sequence number on read.
-//!
-//! # Read path
-//!
-//! `get` consults the memtable set (active, then frozen, newest-first), and on a
-//! miss walks the SSTable tiers newest-first, letting each table's bloom filter
-//! gate the probe. The first table that answers holds the key's newest version.
-//! `scan` folds the memtables and every table through the
-//! [merge iterator](crate::iter), yielding an ascending, tombstone-free stream.
+//! The public engine: [`Db`], wiring the WAL, memtable, SSTable tiers, manifest, and compaction into one
+//! embeddable key/value store. # Write path `put`/`delete` run under a single write mutex.
 
 use std::collections::HashMap;
 use std::ops::{Bound, RangeBounds};
@@ -118,23 +90,8 @@ impl From<CompactionError> for DbError {
 /// Result alias for engine operations.
 pub type Result<T> = std::result::Result<T, DbError>;
 
-/// Write-path state guarded by the single-writer mutex. Kept behind its own lock
-/// so reads never contend with it.
-///
-/// The write path releases this lock across the (potentially group-batched) WAL
-/// append so concurrent writers can enqueue and share one `fsync`. To keep that
-/// safe, the lock guards two coupled fields:
-///
-/// * `next_seq` — the monotonic sequence clock; each writer claims its seq under
-///   the lock so ordering is total even though appends complete concurrently.
-/// * `in_flight` — writers that have claimed a seq but not yet observed their
-///   durable ack and applied to the memtable. A flush must not run while any
-///   write is in flight, because [`Db::flush_locked`] resets the WAL and a
-///   still-in-flight record (already acked to its caller, not yet in the
-///   memtable) would be lost. `flush` therefore waits for `in_flight == 0`.
-/// * `flush_pending` — set while a flush is waiting to run or running. New
-///   writers block in phase 1 until it clears, so `in_flight` can actually drain
-///   to zero (otherwise sustained writes would starve the flush).
+/// Write-path state guarded by the single-writer mutex. Kept behind its own lock so reads never contend
+/// with it.
 #[derive(Debug)]
 struct WriteState {
     next_seq: Seq,
@@ -142,10 +99,8 @@ struct WriteState {
     flush_pending: bool,
 }
 
-/// An embeddable LSM-tree key/value store.
-///
-/// Cheaply shareable across threads: reads take no exclusive lock, and the write
-/// path is serialized internally. Wrap in an `Arc` to hand to multiple threads.
+/// An embeddable lsm-tree key/value store. Cheaply shareable across threads: reads take no exclusive lock,
+/// and the write path is serialized internally.
 #[derive(Debug)]
 pub struct Db {
     storage: Arc<dyn Storage>,
@@ -186,9 +141,7 @@ impl Db {
         Db::open_on(storage, dir.as_ref(), options)
     }
 
-    /// Open a database on a caller-supplied [`Storage`] backend — the seam that
-    /// lets the same engine run on `RealFs` or a shared `SimFs` handle (so a test
-    /// can crash the backend out from under the engine and reopen it).
+    /// Open a database on a caller-supplied [`Storage`] backend.
     pub fn open_on(storage: Arc<dyn Storage>, dir: &Path, options: Options) -> Result<Db> {
         // 1. Recover the manifest: the durable set of tables and the seq floor.
         let manifest = Manifest::open(Arc::clone(&storage), dir)?;
@@ -239,25 +192,6 @@ impl Db {
     }
 
     /// The shared write path for `put` and `delete`.
-    ///
-    /// Three phases keep the db-level `write` lock held only long enough to order
-    /// the write, so concurrent [`Durability::GroupCommit`] writers batch into one
-    /// `fsync` instead of serializing behind each other's park:
-    ///
-    /// 1. **Claim (locked).** Wait out any pending flush, take the next monotonic
-    ///    seq, mark the write in flight, then *release* the lock.
-    /// 2. **Log (unlocked).** Append to the WAL. In `GroupCommit` this is where a
-    ///    writer enqueues and parks on the leader's shared fsync; releasing the
-    ///    lock first is exactly what lets other writers reach this point and join
-    ///    the same batch. Returns only once the mode's durability contract is met.
-    /// 3. **Apply (locked).** Re-take the lock, insert into the memtable *by seq*
-    ///    (concurrent appends may ack out of seq order, so a stale write must not
-    ///    clobber a newer one — see [`MemtableSet::insert_if_newer`]), clear the
-    ///    in-flight mark, then flush if full.
-    ///
-    /// A concurrent reader can never observe an unacked or out-of-order value: the
-    /// memtable insert happens only after the durable ack (phase 3) and drops any
-    /// value older than what is already present for the key.
     fn write(&self, key: &[u8], kind: ValueKind) -> Result<()> {
         // Phase 1: claim a seq under the lock, then release it before the append.
         let seq = {
@@ -326,11 +260,8 @@ impl Db {
         Ok(None)
     }
 
-    /// A forward scan over `range`, yielding live `(key, value)` pairs in
-    /// ascending key order (deletes and shadowed versions removed).
-    ///
-    /// The scan materialises a consistent snapshot of every source up front, so
-    /// the returned iterator is unaffected by concurrent writes or compactions.
+    /// A forward scan over `range`, yielding live `(key, value)` pairs in ascending key order (deletes and
+    /// shadowed versions removed).
     pub fn scan<R>(&self, range: R) -> Result<Scan>
     where
         R: RangeBounds<Vec<u8>> + Clone,
@@ -362,16 +293,8 @@ impl Db {
         self.flush_locked(ws)
     }
 
-    /// Freeze the active memtable (if non-empty), flush every frozen table to a
-    /// new tier-0 SSTable under the manifest protocol, release the WAL, then run
-    /// cascading compaction. Consumes the write-lock guard.
-    ///
-    /// Because the write path releases the lock across its WAL append, a flush
-    /// must first quiesce it: set `flush_pending` (which blocks new writers in the
-    /// claim phase) and wait for `in_flight` to reach zero, so every already-acked
-    /// write has landed in the memtable before [`Wal::reset`] discards the log.
-    /// The pending flag is always cleared on the way out, even on error, so a
-    /// failed flush never wedges the write path.
+    /// Freeze the active memtable (if non-empty), flush every frozen table to a new tier-0 SSTable under
+    /// the manifest protocol, release the WAL, then run cascading compaction.
     fn flush_locked(&self, mut ws: std::sync::MutexGuard<'_, WriteState>) -> Result<()> {
         ws.flush_pending = true;
         while ws.in_flight > 0 {
@@ -386,9 +309,8 @@ impl Db {
         result
     }
 
-    /// The flush body, run only once the write path has quiesced (`in_flight ==
-    /// 0`) with `flush_pending` set so no new writer can slip in. Caller holds the
-    /// write lock and owns clearing `flush_pending`.
+    /// The flush body, run only once the write path has quiesced (`in_flight == 0`) with `flush_pending`
+    /// set so no new writer can slip in.
     fn flush_quiesced(&self, ws: &WriteState) -> Result<()> {
         // Freeze whatever is buffered so the active table is empty while we flush.
         if self.memtables.active_bytes() > 0 {
@@ -430,9 +352,7 @@ impl Db {
         Ok(())
     }
 
-    /// The current manifest [`Version`](crate::manifest::Version) — the live
-    /// table layout. Exposed for tests that assert a workload genuinely crossed
-    /// flush and compaction boundaries (tier structure).
+    /// The current manifest [`Version`](crate::manifest::Version)
     pub fn debug_version(&self) -> Arc<crate::manifest::Version> {
         self.manifest.current()
     }
@@ -459,11 +379,8 @@ impl Db {
     }
 }
 
-/// A forward range scan: live `(key, value)` pairs in ascending key order.
-///
-/// Backed by an owned snapshot of every source, so it holds no lock and outlives
-/// concurrent mutation. Iterating never fails: any I/O error was surfaced when
-/// the scan was constructed.
+/// A forward range scan: live `(key, value)` pairs in ascending key order. Backed by an owned snapshot of
+/// every source, so it holds no lock and outlives concurrent mutation.
 pub struct Scan {
     inner: LiveIter,
 }
@@ -511,11 +428,8 @@ fn range_contains<R: RangeBounds<Vec<u8>>>(range: &R, key: &[u8]) -> bool {
     after_start && before_end
 }
 
-// --- WAL record codec -----------------------------------------------------
-//
-// A WAL payload is one logical mutation:
-//   [seq u64][tag u8]([klen u32][key])([vlen u32][value] iff tag == PUT)
-// The WAL frames this with its own length + CRC; here we only encode the fields.
+// WAL record codec A WAL payload is one logical mutation: [seq u64][tag u8]([klen u32][key])([vlen
+// u32][value] iff tag == put) The WAL frames this with its own length + CRC; here we only encode the fields.
 
 const REC_TAG_DELETE: u8 = 0;
 const REC_TAG_PUT: u8 = 1;
@@ -601,9 +515,8 @@ mod tests {
             .expect("open wal");
             assert!(recovered.records.is_empty());
 
-            // Concurrent writers can claim sequence numbers in one order and
-            // reach the WAL in another. Recovery must resolve by sequence, not
-            // by replay order.
+            // Concurrent writers can claim sequence numbers in one order and reach the WAL in another.
+            // Recovery must resolve by sequence, not by replay order.
             wal.append(&encode_record(
                 2,
                 b"key",

@@ -1,30 +1,5 @@
-//! Size-tiered compaction (synchronous in this stage; a background thread is a
-//! later stage).
-//!
-//! # The strategy, and why
-//!
-//! Tables are grouped into *tiers* of geometrically increasing size. A memtable
-//! flush drops a fresh table into tier 0. When a tier accumulates
-//! [`tier_fanout`](crate::Options) tables, they are merged into one larger table
-//! that moves down to the next tier. This is **size-tiered** compaction: it has
-//! low write amplification (each byte is rewritten only when its whole tier is
-//! merged) and simple invariants, at the cost of higher read/space amplification
-//! than leveled compaction — a deliberate tradeoff defended in `DESIGN_NOTES.md`.
-//!
-//! # Newest-wins merge
-//!
-//! The tables of a tier can hold different versions of the same key. The
-//! [`MergeIterator`](crate::iter::MergeIterator) folds them into one ascending,
-//! de-duplicated stream keeping only the entry with the largest sequence number
-//! per key — the newest write wins.
-//!
-//! # Bottom-tier-only tombstone GC
-//!
-//! A [`Tombstone`](crate::memtable::ValueKind::Tombstone) must be preserved while
-//! any *older* table (a higher-indexed tier) might still hold a live value it is
-//! meant to shadow; dropping it early would resurrect a deleted key. It is safe
-//! to physically drop a tombstone only when the merge output lands in the
-//! bottom-most tier, because then there is nothing older left for it to mask.
+//! Size-tiered compaction (synchronous in this stage; a background thread is a later stage). # The
+//! strategy, and why Tables are grouped into *tiers* of geometrically increasing size.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -103,13 +78,6 @@ fn value_ref(v: &InternalValue) -> ValueRef<'_> {
 }
 
 /// Read an entire SSTable into an owned, key-sorted vector of entries.
-///
-/// Compaction merges whole tiers, so a table is materialised in full here rather
-/// than streamed: the [`SsTableIter`](crate::sstable::SsTableIter) borrows its
-/// reader, which cannot be co-owned with the reader in one `EntrySource` without
-/// `unsafe`. Tier tables are bounded in size, so this is a bounded, honest
-/// simplification (noted in `DESIGN_NOTES.md`); streaming compaction is a future
-/// optimisation, not a correctness requirement.
 fn read_all_entries(reader: &SsTableReader) -> Result<Vec<(Vec<u8>, InternalValue)>> {
     let mut out = Vec::with_capacity(reader.num_entries() as usize);
     for entry in reader.iter() {
@@ -119,13 +87,8 @@ fn read_all_entries(reader: &SsTableReader) -> Result<Vec<(Vec<u8>, InternalValu
     Ok(out)
 }
 
-/// Write a sorted, de-duplicated stream of `(key, value)` entries to a brand-new
-/// SSTable at `path`, returning its [`TableMeta`].
-///
-/// Shared by the memtable flush path and compaction: both produce an ascending,
-/// one-version-per-key stream. `entries` **must** be strictly key-increasing;
-/// `expected_keys` sizes the Bloom filter. Returns `Ok(None)` if the stream is
-/// empty (nothing is written), so callers can skip installing an empty table.
+/// Write a sorted, de-duplicated stream of `(key, value)` entries to a brand-new SSTable at `path`,
+/// returning its [`TableMeta`].
 pub fn write_table<I>(
     storage: Arc<dyn Storage>,
     path: &Path,
@@ -171,27 +134,14 @@ where
     }))
 }
 
-/// Whether compacting tier `t` produces the globally-oldest data, so a tombstone
-/// has nothing older left to shadow and may be physically dropped.
-///
-/// This requires every tier *below* the inputs — the destination tier `t + 1`
-/// **and** everything beyond it — to be empty before the merge. A subtle case the
-/// property tests caught: the destination tier `t + 1` can already hold older
-/// tables from prior compactions, and those may contain a live value that a
-/// tombstone in tier `t` is meant to shadow. Dropping the tombstone then would
-/// resurrect the deleted key, so it is only safe when tier `t + 1` and below are
-/// all empty.
+/// Whether compacting tier `t` produces the globally-oldest data, so a tombstone has nothing older left to
+/// shadow and may be physically dropped.
 fn output_is_bottom(version: &Version, t: usize) -> bool {
     (t + 1..version.num_tiers()).all(|i| version.tier_len(i) == 0)
 }
 
-/// Run one compaction pass over the current version: for the youngest tier that
-/// has reached `tier_fanout` tables, merge it down. Returns `true` if a
-/// compaction happened (the caller loops until it returns `false` to cascade).
-///
-/// A single pass compacts at most one tier so the caller can re-read the freshly
-/// installed version and decide whether a cascading compaction of the next tier
-/// is now warranted.
+/// Run one compaction pass over the current version: for the youngest tier that has reached `tier_fanout`
+/// tables, merge it down.
 pub fn maybe_compact(
     storage: &Arc<dyn Storage>,
     manifest: &Manifest,
@@ -242,9 +192,8 @@ fn compact_tier(
         merged,
     )?;
 
-    // Install the new version. If the merge produced no live entries (everything
-    // was tombstoned away at the bottom tier) the output table is dropped and the
-    // tier is simply cleared.
+    // Install the new version. If the merge produced no live entries (everything was tombstoned away at the
+    // bottom tier) the output table is dropped and the tier is simply cleared.
     let new_version = match output {
         Some(meta) => version.compacted(t, meta),
         None => {
@@ -383,10 +332,8 @@ mod tests {
         let storage: Arc<dyn Storage> = Arc::new(SimFs::with_seed(9));
         let manifest = Manifest::open(Arc::clone(&storage), &dir()).unwrap();
 
-        // Hand-assemble a version with a populated bottom tier 2 holding a live
-        // "d", and four tier-0 tables that tombstone "d". Compacting tier 0 ->
-        // tier 1 puts the output ABOVE the bottom tier 2, so the tombstone MUST be
-        // kept: tier 2 still holds a live "d" it has to shadow.
+        // Hand-assemble a version with a populated bottom tier 2 holding a live "d", and four tier-0 tables
+        // that tombstone "d".
         let mut v = Version::empty();
         for seq in 1..=4u64 {
             let meta = write_at(

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# S6 benchmark matrix driver. Runs each cell N times against a FRESH data dir on
-# the measured disk, teeing raw output to benchmarks/raw/. No numbers are derived
-# here; RESULTS.md quotes/medians whatever these raw files contain.
+# S6 benchmark matrix driver. Runs each cell N times against a fresh data dir on the measured disk, teeing
+# raw output to benchmarks/raw/.
 set -u
 cd "$(dirname "$0")/.."
 B=target/release/accretion-bench

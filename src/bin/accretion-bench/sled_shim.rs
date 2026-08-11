@@ -1,15 +1,4 @@
-//! The sled baseline behind the same [`KvBench`] surface, compiled only under
-//! `--features bench-sled`. Two configurations, matching accretion-db's two
-//! crash-safety contracts (see the durability table in `kv.rs`):
-//!
-//! * [`SledDurable`] — `insert` then `flush()` per write: ack implies fsync,
-//!   the fair match for accretion `Always`.
-//! * [`SledBuffered`] — default sled with the 500 ms background flusher
-//!   *disabled* (`flush_every_ms = None`) and no explicit `flush`: ack does not
-//!   imply durability, the fair match for accretion `OsBuffered`.
-//!
-//! Both are opened via [`sled::Config`] with equal cache and segment settings so
-//! the only variable between them is when (and whether) the fsync barrier runs.
+//! The sled baseline behind the same [`KvBench`] surface, compiled only under `--features bench-sled`.
 
 use std::path::Path;
 

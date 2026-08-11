@@ -1,20 +1,4 @@
-//! [`SsTableReader`] — reads back an immutable SSTable written by
-//! [`SsTableBuilder`](super::builder::SsTableBuilder).
-//!
-//! Opening a table reads and verifies the footer, then loads the sparse index
-//! and the Bloom filter (each CRC-checked) into memory; data blocks are fetched
-//! from storage on demand. A point lookup is:
-//!
-//! 1. `bloom.contains(key)` — a confident "absent" returns immediately without
-//!    any block I/O;
-//! 2. binary search of the sparse index for the one block whose key range could
-//!    contain `key`;
-//! 3. a linear scan of that single decoded (and CRC-verified) 4 KiB block.
-//!
-//! Because the file is immutable, the reader holds no locks and can be shared
-//! freely. Every read re-validates the CRC of whatever structure it touches, so
-//! a torn or bit-flipped byte surfaces as [`SsTableError::Corrupt`] rather than a
-//! wrong answer.
+//! [`SsTableReader`]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,9 +31,8 @@ pub struct SsTableReader {
 }
 
 impl SsTableReader {
-    /// Open the SSTable at `path`, parsing and verifying its footer, sparse
-    /// index, and Bloom filter. Returns [`SsTableError::Corrupt`] if any of
-    /// those structures fails its checksum or bounds checks.
+    /// Open the SSTable at `path`, parsing and verifying its footer, sparse index, and Bloom filter.
+    /// Returns [`SsTableError::Corrupt`] if any of those structures fails its checksum or bounds checks.
     pub fn open(storage: Arc<dyn Storage>, path: &Path) -> Result<Self> {
         let file_len = storage.len(path)?;
         if file_len < FOOTER_SIZE as u64 {
@@ -111,10 +94,8 @@ impl SsTableReader {
         self.bloom.contains(key)
     }
 
-    /// Look up `key`, returning its [`Entry`] (value + seq) if present.
-    ///
-    /// Consults the Bloom filter first, then the single candidate block. Returns
-    /// `Ok(None)` for a genuine miss (including a Bloom "definitely absent").
+    /// Look up `key`, returning its [`Entry`] (value + seq) if present. Consults the Bloom filter first,
+    /// then the single candidate block.
     pub fn get(&self, key: &[u8]) -> Result<Option<Entry>> {
         if !self.bloom.contains(key) {
             return Ok(None);

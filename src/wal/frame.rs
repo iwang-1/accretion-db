@@ -1,23 +1,4 @@
 //! WAL record framing.
-//!
-//! Every record in the log is wrapped in a fixed 8-byte header followed by the
-//! opaque payload the engine handed us:
-//!
-//! ```text
-//! ┌──────────────┬──────────────┬───────────────────────┐
-//! │ payload_len  │ crc32(pay.)  │ payload (payload_len)  │
-//! │  u32 LE (4)  │  u32 LE (4)  │        bytes           │
-//! └──────────────┴──────────────┴───────────────────────┘
-//! ```
-//!
-//! The CRC32 covers **only the payload**, matching the torn-tail recovery rule
-//! documented in `DESIGN_NOTES.md` and demonstrated by the toy store in
-//! `tests/harness.rs`: recovery stops at the first frame that is short (the
-//! header or payload runs past end-of-file) or whose payload fails its CRC.
-//!
-//! Framing is payload-agnostic on purpose — the WAL never interprets record
-//! bytes, so the memtable/record encoding can evolve independently of the log
-//! format.
 
 /// Size of the little-endian `u32` payload-length field.
 pub(crate) const LEN_SZ: usize = 4;
@@ -26,9 +7,8 @@ pub(crate) const CRC_SZ: usize = 4;
 /// Total per-record framing overhead (length + CRC).
 pub(crate) const HEADER_SZ: usize = LEN_SZ + CRC_SZ;
 
-/// Encode `payload` into a complete CRC-framed record ready to append.
-///
-/// The returned buffer is `HEADER_SZ + payload.len()` bytes.
+/// Encode `payload` into a complete crc-framed record ready to append. The returned buffer is `HEADER_SZ +
+/// payload.len()` bytes.
 pub(crate) fn encode(payload: &[u8]) -> Vec<u8> {
     let crc = crc32fast::hash(payload);
     let mut frame = Vec::with_capacity(HEADER_SZ + payload.len());
@@ -49,10 +29,6 @@ pub(crate) struct DecodedFrame {
 }
 
 /// Why a frame could not be decoded from `buf[offset..]`.
-///
-/// Both variants mean the same thing to recovery — the log is torn here, so
-/// everything from this offset on is discarded — but they are distinguished so
-/// the crash journal can report *how* the tail was damaged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrameError {
     /// The header or the declared payload runs past the end of the buffer: a
@@ -63,12 +39,8 @@ pub(crate) enum FrameError {
     BadCrc,
 }
 
-/// Attempt to decode one frame from `buf` starting at `offset`.
-///
-/// Returns [`FrameError::Truncated`] if the header or payload extends past the
-/// end of `buf`, and [`FrameError::BadCrc`] if the payload's CRC does not
-/// verify. On success the payload is copied out and the frame's total length is
-/// reported so the caller can advance.
+/// Attempt to decode one frame from `buf` starting at `offset`. Returns [`FrameError::Truncated`] if the
+/// header or payload extends past the end of `buf`, and [`FrameError::BadCrc`] if the payload's CRC does not verify.
 pub(crate) fn decode(buf: &[u8], offset: usize) -> Result<DecodedFrame, FrameError> {
     let header_end = offset.checked_add(HEADER_SZ).ok_or(FrameError::Truncated)?;
     if header_end > buf.len() {

@@ -1,6 +1,4 @@
-//! Merge-iterator correctness: newest-wins de-duplication, tombstone handling,
-//! forward-scan ordering — all checked against a flat `BTreeMap` reference model
-//! that applies the same writes and computes the expected answer directly.
+//! Merge-iterator correctness: newest-wins de-duplication, tombstone handling, forward-scan ordering.
 
 use super::*;
 use crate::memtable::{InternalValue, ValueKind};
@@ -95,9 +93,8 @@ fn resurrection_after_delete_is_visible() {
     assert_eq!(out, vec![(k("x"), b"third".to_vec())]);
 }
 
-/// The reference model: apply a sequence of `(key, seq, kind)` writes to a flat
-/// `BTreeMap`, keeping the highest-seq version per key, then compute the live
-/// scan result directly.
+/// The reference model: apply a sequence of `(key, seq, kind)` writes to a flat `BTreeMap`, keeping the
+/// highest-seq version per key, then compute the live scan result directly.
 fn model_live(writes: &[(Vec<u8>, u64, ValueKind)]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut m: BTreeMap<Vec<u8>, InternalValue> = BTreeMap::new();
     for (key, seq, kind) in writes {
@@ -120,9 +117,8 @@ fn model_live(writes: &[(Vec<u8>, u64, ValueKind)]) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-/// Distribute the same writes across `n` sources round-robin, keeping only the
-/// newest version per key *within each source* (the per-source contract), each
-/// source key-sorted — exactly the shape memtables/tiers hand the merger.
+/// Distribute the same writes across `n` sources round-robin, keeping only the newest version per key
+/// *within each source* (the per-source contract), each source key-sorted — exactly the shape memtables/tiers.
 fn build_sources(writes: &[(Vec<u8>, u64, ValueKind)], n: usize) -> Vec<EntrySource> {
     let mut buckets: Vec<BTreeMap<Vec<u8>, InternalValue>> = vec![BTreeMap::new(); n];
     for (i, (key, seq, kind)) in writes.iter().enumerate() {

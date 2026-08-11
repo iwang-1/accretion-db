@@ -1,18 +1,5 @@
-//! Abrupt-process-death integration test (RealFs), complementing the
-//! deterministic `SimFs` sweep in `tests/crash.rs`.
-//!
-//! Unlike `SimFs`, this test does not model hardware power loss or torn writes.
-//! It spawns the `accretion-crashtest` child binary writing to a real temp
-//! directory with [`Durability::Always`], lets it acknowledge durable writes,
-//! then sends it `SIGKILL`: abrupt process death with no destructors, application
-//! flush, or unwinding. It reopens the same directory *in this process* and
-//! asserts every acknowledged key survived with its exact value.
-//!
-//! This exercises the durability contract across process death and reopen using
-//! the real kernel and `fsync`; it does not test loss of kernel page cache or
-//! storage-device persistence.
-//!
-//! Unix-only (needs `SIGKILL`); a no-op stub elsewhere.
+//! Abrupt-process-death integration test (RealFs), complementing the deterministic `SimFs` sweep in
+//! `tests/crash.rs`.
 
 #![cfg(unix)]
 
@@ -88,9 +75,7 @@ fn run_one_kill(dir: &Path, settle: Duration) -> u64 {
     });
     let mut highest_acked: Option<u64> = None;
 
-    // Let the child run for the requested window and require a nontrivial durable
-    // prefix before killing it. The hard deadline makes a no-progress host fail
-    // cleanly after terminating the child instead of hanging the test.
+    // Let the child run for the requested window and require a nontrivial durable prefix before killing it.
     let started = Instant::now();
     let settle_deadline = started + settle;
     let hard_deadline = started + std::cmp::max(settle.saturating_mul(10), Duration::from_secs(5));
@@ -149,17 +134,8 @@ fn sigkill_mid_load_preserves_acked_keys() {
     eprintln!("process-kill: verified {acked} acknowledged keys survived SIGKILL");
 }
 
-/// Kill, reopen, then relaunch and kill again against the SAME directory: the
-/// engine must recover cleanly and keep every acked key across repeated abrupt
-/// process deaths. This exercises the reopen → append → kill cycle on real disk,
-/// including WAL and manifest recovery.
-///
-/// The child restarts its index at 0 each round and re-puts the same
-/// (deterministic) values, and the workload contains no deletes, so the set of
-/// present keys only ever grows. We track the high-water mark of acked keys
-/// across all rounds and, at the end, reopen once more to confirm every key up to
-/// that mark is still present with its exact value — no repeated process death
-/// ever lost an acknowledged write.
+/// Kill, reopen, then relaunch and kill again against the same directory: the engine must recover cleanly
+/// and keep every acked key across repeated abrupt process deaths.
 #[test]
 fn repeated_sigkill_recovers_each_time() {
     let tmp = tempfile::tempdir().expect("tempdir");

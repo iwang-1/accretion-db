@@ -1,10 +1,4 @@
 //! Deterministic key/value generation for the benchmark workloads.
-//!
-//! Keys are a fixed 16 bytes and values a fixed 100 bytes (the spec's B1 sizes),
-//! both a pure function of a `u64` index so any phase can reconstruct the exact
-//! bytes for a given index without shared state — the fill phase and the
-//! read/verify phase agree by construction. Randomised access orders are driven
-//! by a *seeded* `StdRng` so a run is reproducible from its seed.
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;

@@ -1,15 +1,4 @@
-//! [`SsTableBuilder`] — writes a sorted run of entries into an immutable SSTable.
-//!
-//! The builder streams entries (which the caller must supply in strictly
-//! increasing key order) into 4 KiB data blocks, accumulating a sparse index
-//! (the first key of each block) and a Bloom filter over every key. On
-//! [`finish`](SsTableBuilder::finish) it appends the index block, the bloom
-//! block, and a fixed-size checksummed footer, then makes the file's bytes
-//! durable with a single `sync_file`.
-//!
-//! The full byte layout is specified in `FORMAT.md`; the encoding here is the
-//! authority that document mirrors. Every structural unit ends in a CRC32 so the
-//! [reader](super::reader) can detect a torn or bit-flipped byte.
+//! [`SsTableBuilder`]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,25 +11,18 @@ use super::{
 };
 
 /// Default Bloom filter budget in bits per key.
-///
-/// 10 bits/key yields a theoretical false-positive rate of `0.6185^10 ≈ 0.8%`
-/// at the optimal `k = 7` (see [`bloom`](super::bloom) for the derivation) — the
-/// usual sweet spot between filter size and probe cost.
 pub const DEFAULT_BITS_PER_KEY: usize = 10;
 
 /// Value tag byte written ahead of each entry's value in a data block.
 pub(crate) const TAG_DELETE: u8 = 0;
 pub(crate) const TAG_PUT: u8 = 1;
 
-/// Size in bytes of the fixed-layout footer at the tail of every SSTable.
-///
-/// `magic(8) + version(4) + index_off(8) + index_len(4) + bloom_off(8) +
-/// bloom_len(4) + num_entries(8) + crc(4)`.
+/// Size in bytes of the fixed-layout footer at the tail of every SSTable. `magic(8) + version(4) +
+/// index_off(8) + index_len(4) + bloom_off(8) + bloom_len(4) + num_entries(8) + crc(4)`.
 pub(crate) const FOOTER_SIZE: usize = 48;
 
-/// Metadata about a finished SSTable, returned by
-/// [`finish`](SsTableBuilder::finish) for the caller (e.g. the manifest) to
-/// record.
+/// Metadata about a finished SSTable, returned by [`finish`](SsTableBuilder::finish) for the caller (e.g.
+/// the manifest) to record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsTableSummary {
     /// Total number of entries written.
@@ -85,11 +67,8 @@ struct IndexEntry {
 }
 
 impl SsTableBuilder {
-    /// Create a builder that writes to `path` on `storage`.
-    ///
-    /// `expected_keys` sizes the Bloom filter (see [`BloomFilter::new`]);
-    /// supplying the exact count from the flushing memtable makes the filter's
-    /// FPR land on target. The file is created empty immediately.
+    /// Create a builder that writes to `path` on `storage`. `expected_keys` sizes the Bloom filter (see
+    /// [`BloomFilter::new`]); supplying the exact count from the flushing memtable makes the filter's fpr land on target.
     pub fn new(
         storage: Arc<dyn Storage>,
         path: &Path,
@@ -120,9 +99,7 @@ impl SsTableBuilder {
             }
         }
 
-        // Seal the current block first if appending this entry would overflow the
-        // 4 KiB target — but never seal an empty block (a single oversized entry
-        // gets a block to itself).
+        // Seal the current block first if appending this entry would overflow the 4 KiB target.
         let entry_len = encoded_entry_len(key, value);
         if !self.block.is_empty() && self.block.len() + entry_len > BLOCK_SIZE {
             self.seal_block()?;
@@ -163,10 +140,8 @@ impl SsTableBuilder {
         Ok(())
     }
 
-    /// Finish the table: flush the last block, write the index and bloom blocks
-    /// and the footer, then `sync_file` the whole file durable. Returns a
-    /// [`SsTableSummary`]. The caller is responsible for the rename+`sync_dir`
-    /// that installs the file under the manifest protocol.
+    /// Finish the table: flush the last block, write the index and bloom blocks and the footer, then
+    /// `sync_file` the whole file durable.
     pub fn finish(mut self) -> Result<SsTableSummary> {
         self.seal_block()?;
 

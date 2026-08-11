@@ -1,29 +1,4 @@
 //! The crash-consistency stage: the heart of `accretion-db`.
-//!
-//! This suite drives the *full engine* ([`Db`]) under the deterministic
-//! power-loss simulator ([`SimFs`]) and proves the recovery invariant at every
-//! write/fsync boundary:
-//!
-//! > **Zero acknowledged-write loss.** Every `put`/`delete` that returned under a
-//! > durable [`Durability`] mode is present with its exact value after recovery;
-//! > an in-flight (never-returned) op is either fully present or fully absent; no
-//! > phantom keys, no corruption, and `scan` agrees with `get`.
-//!
-//! Three layers, matching the spec:
-//!
-//! 1. [`exhaustive`] — a canonical mixed workload sized to force ≥2 memtable
-//!    flushes and ≥1 compaction. The workload is run once to count `N`, the exact
-//!    number of mutating storage ops; then for every crash point `i in 1..=N`,
-//!    across several seeds (so the crash's tear mode — drop / torn / bit-flip —
-//!    varies), the engine is crashed after op `i`, reopened, and verified.
-//! 2. [`schedules`] — proptest random op sequences × random crash points × random
-//!    durable modes, model-verified after recovery. Shrinks to minimal
-//!    counterexamples; discovered failures are persisted to
-//!    `tests/crash.proptest-regressions` for replay on later runs.
-//! 3. `tests/process_kill.rs` — the real SIGKILL integration test (RealFs).
-//!
-//! The count `N` and the seed multiplier are the headline distinct-crash-point
-//! figure; [`exhaustive::reports_crash_point_count`] prints them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -91,14 +66,8 @@ fn key_universe(ops: &[Op]) -> Vec<Vec<u8>> {
     ks
 }
 
-/// Run `ops` against a freshly-opened engine on `fs`, recording into `acked` the
-/// number of ops that *fully returned* before any crash halted the workload.
-///
-/// A durable-mode `put`/`delete` is "acknowledged" precisely when it returns, so
-/// the count is a prefix length: ops `0..acked` all completed durably. When the
-/// injected crash fires mid-op the next storage call errors, the op returns
-/// `Err`, `.expect(...)` panics, and the harness catches that expected unwind —
-/// leaving `acked` at the number of ops that truly finished.
+/// Run `ops` against a freshly-opened engine on `fs`, recording into `acked` the number of ops that *fully
+/// returned* before any crash halted the workload.
 fn run_workload(fs: Arc<dyn Storage>, mode: Durability, ops: &[Op], acked: &AtomicUsize) {
     let db = Db::open_on(fs, Path::new(DIR), opts(mode)).expect("open db");
     for op in ops {
@@ -111,12 +80,6 @@ fn run_workload(fs: Arc<dyn Storage>, mode: Durability, ops: &[Op], acked: &Atom
 }
 
 /// Verify the recovery invariant against the recovered filesystem.
-///
-/// `acked` ops fully returned (must be durable); op `ops[acked]` (if any) was
-/// in-flight when the crash struck and may or may not have applied; ops after it
-/// never started. So for every key the engine's value must equal what the acked
-/// prefix says, unless the in-flight op touched that key — in which case either
-/// the acked-prefix value or the value including the in-flight op is acceptable.
 fn verify(fs: Arc<dyn Storage>, mode: Durability, ops: &[Op], acked: usize, _r: &CrashReport) {
     // Reopen the engine on the post-crash image (no crash armed now).
     let db = Db::open_on(fs, Path::new(DIR), opts(mode)).expect("reopen after crash");
@@ -147,9 +110,8 @@ fn verify(fs: Arc<dyn Storage>, mode: Durability, ops: &[Op], acked: usize, _r: 
         );
     }
 
-    // 2. Scan/get consistency: the scan is sorted, every pair it yields is a live
-    //    key in the universe whose value matches a fresh `get`, and the set of
-    //    keys the scan yields is exactly the set of universe keys `get` finds live.
+    // 2. Scan/get consistency: the scan is sorted, every pair it yields is a live key in the universe whose
+    // value matches a fresh `get`, and the set of keys the scan yields is exactly the set of universe keys `get` finds live.
     let scanned: Vec<(Vec<u8>, Vec<u8>)> = db.scan(..).expect("scan").collect();
     assert!(
         scanned.windows(2).all(|w| w[0].0 < w[1].0),
@@ -178,9 +140,8 @@ fn verify(fs: Arc<dyn Storage>, mode: Durability, ops: &[Op], acked: usize, _r: 
     }
 }
 
-/// The canonical crash workload: mixed puts, overwrites, and deletes over a small
-/// colliding key set, sized (with the 128-byte memtable) to force several flushes
-/// and at least one compaction. Deterministic, so `N` is stable across runs.
+/// The canonical crash workload: mixed puts, overwrites, and deletes over a small colliding key set, sized
+/// (with the 128-byte memtable) to force several flushes and at least one compaction.
 fn canonical_ops() -> Vec<Op> {
     let mut ops = Vec::new();
     // Round 1: seed 12 distinct keys with 12-byte values → forces multiple freezes.
@@ -221,14 +182,11 @@ fn canonical_ops() -> Vec<Op> {
 mod exhaustive {
     use super::*;
 
-    /// The seeds swept at every crash point. Different seeds steer the SimFs RNG
-    /// to different tear modes (drop / truncate / bit-flip) on the crashing op, so
-    /// the same crash point is exercised against all three power-loss variants.
+    /// The seeds swept at every crash point.
     const SEEDS: [u64; 4] = [1, 7, 42, 1234];
 
-    /// Count `N`: the exact number of mutating storage ops the canonical workload
-    /// issues. Seed-independent (the RNG only fires at crash time), so any seed
-    /// gives the same count.
+    /// Count `N`: the exact number of mutating storage ops the canonical workload issues. Seed-independent
+    /// (the rng only fires at crash time), so any seed gives the same count.
     fn count_workload_ops(mode: Durability) -> u64 {
         let sim = Arc::new(SimFs::with_seed(0));
         let fs: Arc<dyn Storage> = sim.clone();
@@ -272,9 +230,8 @@ mod exhaustive {
         sweep(Durability::GroupCommit);
     }
 
-    /// The workload must genuinely cross flush and compaction boundaries, or the
-    /// sweep would not exercise the paths it claims to. Assert it forms multiple
-    /// tiers (⇒ ≥2 flushes and ≥1 compaction) on a clean run.
+    /// The workload must genuinely cross flush and compaction boundaries, or the sweep would not exercise
+    /// the paths it claims to.
     #[test]
     fn workload_forces_flushes_and_compaction() {
         let sim = Arc::new(SimFs::with_seed(0));
@@ -310,11 +267,8 @@ mod exhaustive {
     }
 }
 
-/// Property-based random crash schedules: an arbitrary op sequence, crashed at an
-/// arbitrary point, in an arbitrary durable mode, must recover with zero
-/// acknowledged-write loss. proptest shrinks any failure to a minimal
-/// counterexample. When a failure is discovered, proptest creates or updates
-/// `tests/crash.proptest-regressions` so that shape runs before new cases later.
+/// Property-based random crash schedules: an arbitrary op sequence, crashed at an arbitrary point, in an
+/// arbitrary durable mode, must recover with zero acknowledged-write loss. proptest shrinks any failure to a.
 mod schedules {
     use super::*;
     use proptest::prelude::*;
@@ -331,9 +285,7 @@ mod schedules {
         config
     }
 
-    /// A small colliding key alphabet so puts, overwrites, and deletes of the same
-    /// key interleave often — that collision is what stresses newest-wins and
-    /// tombstone handling across memtable, tiers, and compaction after a crash.
+    /// A small colliding key alphabet so puts, overwrites, and deletes of the same key interleave often.
     fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
         proptest::collection::vec(b'a'..=b'd', 1..=2)
     }
@@ -346,9 +298,8 @@ mod schedules {
         ]
     }
 
-    /// Map a bool onto a durable mode. `OsBuffered` is excluded: it makes no
-    /// crash-durability promise, so "acked ⇒ survives" — the property under test —
-    /// does not apply to it.
+    /// Map a bool onto a durable mode. `OsBuffered` is excluded: it makes no crash-durability promise, so
+    /// "acked ⇒ survives" — the property under test — does not apply to it.
     fn durable_mode(pick: bool) -> Durability {
         if pick {
             Durability::Always
@@ -393,9 +344,8 @@ mod schedules {
                 seed,
                 crash_at,
                 move |fs| run_workload(fs, mode, &ops_body, &acked_body),
-                // Plain assertions inside the verifier: a panic here is caught by
-                // proptest and shrunk. (`prop_assert!` is unavailable — the
-                // verifier closure returns `()`, not a `TestCaseResult`.)
+                // Plain assertions inside the verifier: a panic here is caught by proptest and shrunk.
+                // (`prop_assert!` is unavailable — the verifier closure returns `()`, not a `TestCaseResult`.)
                 move |fs, report| {
                     verify(fs, mode, &ops_verify, acked.load(Ordering::SeqCst), report)
                 },
@@ -404,13 +354,8 @@ mod schedules {
     }
 }
 
-/// Fixed-seed regression corpus: named, deterministic crash schedules pinning the
-/// specific boundaries the recovery invariant most depends on. These run in CI
-/// every time (unlike the randomized `schedules`, which sample), so a regression
-/// in any of these exact shapes fails loudly and reproducibly.
-///
-/// Each sweeps *every* crash point of its (small) workload across all tear-mode
-/// seeds, so it covers the crash landing before/at/after each fsync boundary.
+/// Fixed-seed regression corpus: named, deterministic crash schedules pinning the specific boundaries the
+/// recovery invariant most depends on.
 mod regressions {
     use super::*;
 
@@ -454,9 +399,8 @@ mod regressions {
         [Durability::Always, Durability::GroupCommit]
     }
 
-    /// Overwrite-then-delete-then-resurrect a single key with enough volume to
-    /// force flushes between the versions: a crash at any op must never resurrect
-    /// a deleted value nor lose the final live one when it was acked.
+    /// Overwrite-then-delete-then-resurrect a single key with enough volume to force flushes between the
+    /// versions: a crash at any op must never resurrect a deleted value nor lose the final live one when it was acked.
     #[test]
     fn resurrection_across_flush() {
         // 20-byte values with a 128-byte memtable flush every ~5 writes.
@@ -474,10 +418,7 @@ mod regressions {
         }
     }
 
-    /// A delete of a key that already lives in a lower tier, with a compaction in
-    /// between — the exact shape behind the S2 tombstone-GC bug — swept for crash
-    /// consistency: the tombstone must survive every crash point until it is
-    /// safely GC'd, never resurrecting the shadowed value.
+    /// A delete of a key that already lives in a lower tier, with a compaction in between.
     #[test]
     fn tombstone_shadow_through_compaction() {
         let mut ops = Vec::new();
@@ -496,9 +437,8 @@ mod regressions {
         }
     }
 
-    /// A pure-delete-heavy schedule: many keys created then deleted, crashing at
-    /// every point. Deleted-and-acked keys must stay absent; live-and-acked keys
-    /// must stay present.
+    /// A pure-delete-heavy schedule: many keys created then deleted, crashing at every point.
+    /// Deleted-and-acked keys must stay absent; live-and-acked keys must stay present.
     #[test]
     fn delete_heavy_schedule() {
         let mut ops = Vec::new();

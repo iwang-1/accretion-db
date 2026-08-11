@@ -1,28 +1,5 @@
-//! The read path's k-way merge: fold many key-sorted sources (active + frozen
-//! memtables, then SSTable tiers) into one ascending, de-duplicated stream.
-//!
-//! # What it guarantees
-//!
-//! Given any number of sources that each yield [`Entry`]s in ascending key
-//! order and hold at most one version per key, [`MergeIterator`]:
-//!
-//! * yields keys in ascending order (a forward scan);
-//! * for a key present in several sources, yields exactly **one** entry — the
-//!   one with the largest [`Seq`] (*newest-wins*), discarding the rest;
-//! * preserves [`Tombstone`](crate::memtable::ValueKind::Tombstone)s, because a
-//!   deletion must still shadow older live values in lower tiers. The
-//!   compaction merge consumes this raw stream. User-facing scans layer
-//!   [`MergeIterator::live`] on top to drop tombstones and expose plain
-//!   `(key, value)` pairs.
-//!
-//! # Why newest-wins is well defined here
-//!
-//! Every source holds at most one version of any key, so for a given key there
-//! is at most one entry per source. When that key is the smallest remaining key
-//! across all sources, it sits at the head of *every* source that contains it
-//! simultaneously — so all its versions are in the heap at once and the largest
-//! sequence number is guaranteed to pop first. See the module tests for the
-//! adversarial cases (interleaved overwrites, deletes, resurrections).
+//! The read path's k-way merge: fold many key-sorted sources (active + frozen memtables, then SSTable
+//! tiers) into one ascending, de-duplicated stream. # What it guarantees Given any number of sources that each.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -38,11 +15,8 @@ mod tests;
 /// reader produce these; the merge iterator does not care which is which.
 pub type EntrySource = Box<dyn Iterator<Item = Entry> + Send>;
 
-/// One source's current head, ordered for the merge heap.
-///
-/// [`BinaryHeap`] is a max-heap, so [`Ord`] is written "backwards": the element
-/// that should come out *first* must compare as the *greatest*. We want the
-/// smallest key first, and among equal keys the largest sequence number first.
+/// One source's current head, ordered for the merge heap. [`BinaryHeap`] is a max-heap, so [`Ord`] is
+/// written "backwards": the element that should come out *first* must compare as the *greatest*.
 struct HeapHead {
     key: Vec<u8>,
     value: InternalValue,
@@ -59,10 +33,8 @@ impl Eq for HeapHead {}
 
 impl Ord for HeapHead {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Smallest key should be "greatest" so it pops first: reverse the key
-        // comparison. Break ties by *largest* seq popping first: forward seq
-        // comparison (larger seq = greater = pops first). The source index is a
-        // final tiebreaker purely for a total, deterministic order.
+        // Smallest key should be "greatest" so it pops first: reverse the key comparison. Break ties by
+        // *largest* seq popping first: forward seq comparison (larger seq = greater = pops first).
         other
             .key
             .cmp(&self.key)
@@ -76,9 +48,8 @@ impl PartialOrd for HeapHead {
     }
 }
 
-/// A forward, newest-wins, tombstone-preserving merge over many key-sorted
-/// sources. Construct with [`MergeIterator::new`]; iterate for [`Entry`]s, or
-/// call [`live`](Self::live) to drop tombstones and expose `(key, value)`.
+/// A forward, newest-wins, tombstone-preserving merge over many key-sorted sources. Construct with
+/// [`MergeIterator::new`]; iterate for [`Entry`]s, or call [`live`](Self::live) to drop tombstones and expose `(key, value)`.
 pub struct MergeIterator {
     sources: Vec<EntrySource>,
     heap: BinaryHeap<HeapHead>,
@@ -94,12 +65,8 @@ impl std::fmt::Debug for MergeIterator {
 }
 
 impl MergeIterator {
-    /// Build a merge over `sources`. Each source must yield entries in ascending
-    /// key order and hold at most one version per key; nothing else is assumed.
-    ///
-    /// Source order is irrelevant to correctness — duplicates are resolved by
-    /// sequence number, not by position — so callers may pass memtables and
-    /// tiers in any convenient order.
+    /// Build a merge over `sources`. Each source must yield entries in ascending key order and hold at most
+    /// one version per key; nothing else is assumed.
     pub fn new(sources: Vec<EntrySource>) -> Self {
         let mut sources = sources;
         let mut heap = BinaryHeap::with_capacity(sources.len());
@@ -122,9 +89,7 @@ impl MergeIterator {
         }
     }
 
-    /// Adapt this raw merge into a tombstone-free stream of `(key, value)` pairs
-    /// — the user-facing forward scan. Tombstones (and the older values they
-    /// shadow) are dropped.
+    /// Adapt this raw merge into a tombstone-free stream of `(key, value)` pairs.
     pub fn live(self) -> LiveIter {
         LiveIter { inner: self }
     }

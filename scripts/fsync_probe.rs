@@ -1,33 +1,4 @@
-//! `fsync_probe` — measure this host's 4 KiB `fsync` latency distribution.
-//!
-//! This is the single number that frames accretion-db's whole durability story:
-//! a durable `put` cannot return until the data is on stable storage, and on a
-//! spinning-rust-or-SSD disk that means paying one `fsync`. On the build host a
-//! 4 KiB `fdatasync` costs ~878 µs p50 (the heavier directory fsync behind
-//! rename durability is ~1.97 ms), so a naive fsync-per-write engine is capped
-//! at ~1000/0.878 ≈ 1140 durable writes/sec **regardless of how good the engine
-//! is** — the disk, not
-//! the code, is the bottleneck. Group commit's job is to amortize one `fsync`
-//! across many queued writers; the multiplier it buys is only meaningful next to
-//! the raw `fsync` cost this probe reports.
-//!
-//! It is deliberately a **standalone `std`-only program**, not a crate bin: it
-//! measures the disk, not the engine, so it must not depend on accretion-db's
-//! build. Compile and run it directly:
-//!
-//! ```text
-//! rustc -O scripts/fsync_probe.rs -o /tmp/fsync_probe
-//! /tmp/fsync_probe                         # default: 1000 iters in a temp dir
-//! /tmp/fsync_probe --iters 2000 --dir /mnt/data   # custom
-//! ```
-//!
-//! Methodology (documented in benchmarks/RESULTS.md): for each iteration we write
-//! a full 4 KiB block at offset 0 of a private file and call `sync_data`, timing
-//! *only* the sync. We report `sync_data` (data-only, `fdatasync`) as the
-//! headline — that is what the WAL commit path pays per fsync — and `sync_all`
-//! (`fsync`, data + metadata) alongside for context, plus a directory-handle
-//! fsync (what the manifest's rename-durability protocol pays). No number here is
-//! hard-coded anywhere; RESULTS.md quotes whatever this prints on the build host.
+//! `fsync_probe`
 
 #![forbid(unsafe_code)]
 
@@ -170,10 +141,7 @@ fn run(cfg: &Config) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Measure the cost of fsync'ing a *directory* handle — the operation the
-/// manifest's tmp+rename+dir-fsync protocol pays to make a rename durable. On
-/// some platforms opening a directory as a `File` and syncing it is not
-/// supported; return `None` rather than failing the whole probe.
+/// Measure the cost of fsync'ing a *directory* handle.
 fn probe_dir_fsync(dir: &Path, iters: usize) -> std::io::Result<Option<Vec<u64>>> {
     let subdir = dir.join(format!(
         "accretion_fsync_probe_dir_{}",

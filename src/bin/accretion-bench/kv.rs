@@ -1,46 +1,5 @@
-//! The `KvBench` trait: the single narrow surface the throughput driver speaks,
-//! implemented by both `accretion-db` and (behind `--features bench-sled`) sled,
-//! so every engine runs the *same* driver code, the *same* workload generator,
-//! and the *same* histogram. Any throughput or latency difference is then a
-//! property of the engine, not of the measurement harness.
-//!
-//! ## Matched durability — the honesty-critical part
-//!
-//! A durability comparison is only fair if both engines make the *same promise*
-//! about an acked write. accretion-db's three [`Durability`] modes map onto sled
-//! configurations as follows; this mapping is reproduced verbatim in
-//! `benchmarks/RESULTS.md` and in the README methodology section.
-//!
-//! | accretion-db mode        | promise on `put` return             | matched sled config |
-//! |--------------------------|-------------------------------------|---------------------|
-//! | `Always`                 | record fsync'd before ack           | `flush()` after every `insert` |
-//! | `GroupCommit`            | record fsync'd (batched) before ack | *no sled equivalent* — sled has no group-commit API; reported as an accretion-only mode, never compared to sled |
-//! | `OsBuffered`             | no durability guarantee on ack     | sled with `flush_every_ms = None` (background flusher disabled), never calling `flush()` |
-//!
-//! ### Why these are the fair matches
-//!
-//! * **Durable match — accretion `Always` vs sled `insert` + `flush`.** sled's
-//!   `Db::flush` fsyncs all dirty IO buffers (its docs), i.e. it is sled's
-//!   durability barrier. Calling it after every `insert` gives sled the same
-//!   *ack-implies-fsync* contract accretion `Always` gives, so both pay one
-//!   fsync per write and both are bounded by the disk's fdatasync cost
-//!   (~878 µs p50 on the build host; see DESIGN_NOTES). This is the
-//!   apples-to-apples durable row.
-//!
-//! * **Buffered match — accretion `OsBuffered` vs sled default, flusher off.**
-//!   sled's `flush_every_ms` (default `Some(500)`) spawns a background thread
-//!   that fsyncs every 500 ms; an acked `insert` is *not* fsync'd synchronously
-//!   either way, so like accretion `OsBuffered` the ack does not imply
-//!   durability. We set `flush_every_ms = None` and never call `flush()` so the
-//!   comparison measures pure buffered-insert throughput on both sides with the
-//!   background flusher removed as a variable. We disclose that neither buffered
-//!   configuration is crash-safe.
-//!
-//! * **`GroupCommit` is deliberately *not* matched to sled.** sled exposes no
-//!   group-commit knob, so any sled config we picked would be an unfair straw
-//!   man. `GroupCommit` is reported as accretion-db's own headline mode against
-//!   its own `Always` baseline (the group-commit multiplier), never as a sled
-//!   win. Stating this explicitly is part of the honesty brand.
+//! The `KvBench` trait: the single narrow surface the throughput driver speaks, implemented by both
+//! `accretion-db` and (behind `--features bench-sled`) sled, so every engine runs the *same* driver code, the.
 
 use std::path::Path;
 
@@ -53,12 +12,8 @@ use std::sync::Arc;
 
 use crate::BenchResult;
 
-/// The uniform key/value surface the driver benchmarks against.
-///
-/// Implementations wrap a concrete engine at a chosen durability configuration.
-/// Every method mirrors the durability contract of the engine it wraps: `put`
-/// returns only once that engine's ack contract for the configured mode is met,
-/// so the driver's per-op timing captures the real cost of the promise.
+/// The uniform key/value surface the driver benchmarks against. Implementations wrap a concrete engine at a
+/// chosen durability configuration.
 pub trait KvBench {
     /// Human-readable engine + durability label for the results table.
     fn label(&self) -> String;

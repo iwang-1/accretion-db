@@ -1,13 +1,5 @@
-//! Reference-model property tests: the real [`Db`] engine driven with a random
-//! sequence of operations must agree, at every observation point, with a plain
-//! `BTreeMap` computing the same answer directly.
-//!
-//! The same op sequence is applied to both the engine and the model, and after
-//! every op a point read (and periodically a full scan) is cross-checked. The
-//! memtable is sized small and flushes are injected so the sequence genuinely
-//! crosses freeze/flush and compaction boundaries rather than staying in one
-//! memtable. Every durability mode is exercised — correctness of the read path is
-//! mode-independent, so all three must match the model with no crash involved.
+//! Reference-model property tests: the real [`Db`] engine driven with a random sequence of operations must
+//! agree, at every observation point, with a plain `BTreeMap` computing the same answer directly.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -31,9 +23,7 @@ enum Op {
     Scan(Vec<u8>, Vec<u8>),
 }
 
-/// Keys are drawn from a small alphabet so puts, overwrites, and deletes collide
-/// often — that collision is what stresses newest-wins across memtable, tiers,
-/// and compaction.
+/// Keys are drawn from a small alphabet so puts, overwrites, and deletes collide often.
 fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(b'a'..=b'e', 1..=3)
 }
@@ -138,9 +128,7 @@ proptest! {
     }
 }
 
-/// A fixed regression: overwrite then delete then re-put a key across a flush,
-/// in every mode — the canonical newest-wins-across-boundaries case, pinned as a
-/// named test so a shrink from the proptest has a home.
+/// A fixed regression: overwrite then delete then re-put a key across a flush, in every mode.
 #[test]
 fn resurrection_across_flush_all_modes() {
     let ops = vec![

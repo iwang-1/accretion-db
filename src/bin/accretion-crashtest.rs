@@ -1,25 +1,4 @@
-//! `accretion-crashtest` — the child half of the real-process kill harness.
-//!
-//! This binary is spawned by `tests/process_kill.rs`. It opens a real
-//! (`RealFs`-backed) [`Db`] with [`Durability::Always`] and writes keys in a
-//! tight loop, printing each key's index to stdout **after** its `put` returns —
-//! i.e. after the write is genuinely durable on disk. The parent reads that
-//! stream of acknowledged indices, `SIGKILL`s this process mid-load (abrupt,
-//! un-catchable process death with no destructor, application flush, or
-//! unwinding), then reopens the same directory and verifies every acknowledged
-//! key survived.
-//!
-//! Two subcommands:
-//!
-//! * `write <dir>` — open at `<dir>` and append acked keys forever, printing
-//!   `<index>\n` (stdout, flushed) after each durable `put`.
-//! * `verify <dir>` — reopen `<dir>` and print, one per line, the value of each
-//!   key `0..` that is present, stopping at the first absent key. (Unused by the
-//!   test — which verifies in-process — but handy for manual debugging.)
-//!
-//! Keys are `key{index:012}` and values `val-{index:012}-<padding>`, so a value
-//! is a pure function of its index and the parent can reconstruct the expected
-//! value for any acked index without coordination.
+//! `accretion-crashtest`
 
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -59,10 +38,6 @@ fn main() -> ExitCode {
 }
 
 /// Open the database and write acked keys forever, announcing each durable put.
-///
-/// A small memtable makes the run cross freeze/flush/compaction boundaries within
-/// the first few hundred writes, so a kill at a random time lands on a variety of
-/// engine states (WAL-only, mid-flush, post-compaction).
 fn write_loop(dir: &str) -> ExitCode {
     let opts = Options {
         durability: Durability::Always,
@@ -77,9 +52,8 @@ fn write_loop(dir: &str) -> ExitCode {
         }
     };
 
-    // Announce acked indices on a buffered stdout that we flush every write, so
-    // the parent sees an index only once its put is durable — and never loses a
-    // line to buffering when the SIGKILL lands.
+    // Announce acked indices on a buffered stdout that we flush every write, so the parent sees an index
+    // only once its put is durable — and never loses a line to buffering when the sigkill lands.
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     let mut i: u64 = 0;

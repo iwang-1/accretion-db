@@ -1,31 +1,4 @@
-//! The manifest: the crash-safe, versioned record of *which SSTables exist and
-//! which tier each lives in*.
-//!
-//! The set of live tables changes every time a memtable is flushed or a
-//! compaction merges a tier. Each such change installs a brand-new immutable
-//! [`Version`]; readers pin the current version as an `Arc<Version>` and keep
-//! reading it, unbothered, even while a newer version is installed and old files
-//! are deleted underneath them.
-//!
-//! # Atomic version switch
-//!
-//! Installing a version writes the whole manifest snapshot to a scratch file,
-//! `sync_file`s it, atomically `rename`s it over `MANIFEST`, then `sync_dir`s the
-//! directory. Without that final directory fsync the rename is volatile: a crash
-//! could leave the directory entry pointing at the old manifest even though the
-//! new bytes are durable (see `DESIGN_NOTES.md`). The order also matters relative
-//! to file deletion — obsolete SSTables are removed *only after* the new manifest
-//! that stops referencing them is durable, so a crash mid-switch can at worst
-//! leave unreferenced garbage (reclaimed by the next GC), never a dangling
-//! reference.
-//!
-//! # File GC only when unreferenced
-//!
-//! When a version is superseded it is retained until no reader pins it — detected
-//! via the `Arc` strong count. A table file is deleted only once it is referenced
-//! by neither the current version nor any still-pinned older version. This is the
-//! concrete mechanism behind "readers pinned to an old `Arc<Version>` stay correct
-//! while compaction replaces files".
+//! The manifest: the crash-safe, versioned record of *which SSTables exist and which tier each lives in*.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -73,10 +46,8 @@ impl From<StorageError> for ManifestError {
     }
 }
 
-/// Immutable metadata describing one SSTable file on disk.
-///
-/// The key range lets the read path skip a table whose `[first_key, last_key]`
-/// span cannot contain the sought key without opening the file.
+/// Immutable metadata describing one SSTable file on disk. The key range lets the read path skip a table
+/// whose `[first_key, last_key]` span cannot contain the sought key without opening the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableMeta {
     /// Unique file id; the on-disk filename is [`table_path`]`(dir, id)`.
@@ -98,16 +69,6 @@ impl TableMeta {
 }
 
 /// An immutable snapshot of the LSM's file layout at one point in time.
-///
-/// A `Version` is never mutated after it is built; a change produces a fresh
-/// `Version` via [`flushed`](Version::flushed) or [`compacted`](Version::compacted).
-/// Readers hold an `Arc<Version>` and see a consistent set of tables for as long
-/// as they keep it.
-///
-/// `tiers[0]` is the youngest tier (fresh flushes land here); higher indices hold
-/// older, larger, previously-compacted tables. Within a tier, tables are ordered
-/// oldest-first (a compaction output or newest flush is pushed at the back), so a
-/// larger file id is newer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Version {
     /// Tables grouped by tier; `tiers[0]` youngest.
@@ -148,10 +109,8 @@ impl Version {
         self.tiers.len()
     }
 
-    /// Tables ordered newest-first for a point lookup: youngest tier first, and
-    /// within a tier the most-recently-added (largest id) first. The first table
-    /// in this order that contains a key holds that key's newest version, so a
-    /// point read can stop at the first hit.
+    /// Tables ordered newest-first for a point lookup: youngest tier first, and within a tier the
+    /// most-recently-added (largest id) first.
     pub fn tables_newest_first(&self) -> Vec<Arc<TableMeta>> {
         let mut out = Vec::new();
         for tier in &self.tiers {
@@ -176,9 +135,8 @@ impl Version {
         v
     }
 
-    /// Derive a new version in which every table of tier `t` is replaced by the
-    /// single merged `output` table placed at tier `t + 1` — the size-tiered
-    /// compaction step. Empty tiers are trimmed from the tail.
+    /// Derive a new version in which every table of tier `t` is replaced by the single merged `output`
+    /// table placed at tier `t + 1` — the size-tiered compaction step.
     pub fn compacted(&self, t: usize, output: TableMeta) -> Version {
         let mut v = self.clone();
         while v.tiers.len() <= t + 1 {
@@ -196,18 +154,14 @@ impl Version {
     }
 }
 
-/// The path of the SSTable file for `id` within database directory `dir`.
-///
-/// The 20-digit zero-padded name sorts lexicographically the same as
-/// numerically, matching the WAL segment convention.
+/// The path of the SSTable file for `id` within database directory `dir`. The 20-digit zero-padded name
+/// sorts lexicographically the same as numerically, matching the WAL segment convention.
 pub fn table_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("{id:020}.sst"))
 }
 
-/// The crash-safe, versioned manifest handle.
-///
-/// Holds the current [`Version`] plus every superseded version still pinned by a
-/// reader, and owns the atomic file-switch + GC protocol.
+/// The crash-safe, versioned manifest handle. Holds the current [`Version`] plus every superseded version
+/// still pinned by a reader, and owns the atomic file-switch + GC protocol.
 #[derive(Debug)]
 pub struct Manifest {
     fs: Arc<dyn Storage>,
@@ -223,11 +177,8 @@ struct Inner {
 }
 
 impl Manifest {
-    /// Open the manifest in `dir`, creating a fresh empty one if none exists.
-    ///
-    /// A pre-existing `MANIFEST` is parsed and CRC-verified; its version becomes
-    /// current. On a fresh directory an empty manifest is written durably so a
-    /// subsequent crash still finds a valid file.
+    /// Open the manifest in `dir`, creating a fresh empty one if none exists. A pre-existing `manifest` is
+    /// parsed and crc-verified; its version becomes current.
     pub fn open(fs: Arc<dyn Storage>, dir: &Path) -> Result<Manifest> {
         let path = dir.join(MANIFEST_NAME);
         let current = if fs.open(&path).is_ok() {
@@ -262,12 +213,8 @@ impl Manifest {
         Arc::clone(&self.inner.lock().expect("manifest poisoned").current)
     }
 
-    /// Durably install `new` as the current version, then delete any table file
-    /// no longer referenced by a live version.
-    ///
-    /// The new manifest is made durable *before* any file is deleted, so a crash
-    /// during the switch can only strand unreferenced garbage — never leave the
-    /// manifest pointing at a file that has already been removed.
+    /// Durably install `new` as the current version, then delete any table file no longer referenced by a
+    /// live version.
     pub fn install(&self, new: Version) -> Result<Arc<Version>> {
         // 1. Persist the new manifest durably (tmp + sync_file + rename + sync_dir).
         write_manifest(&*self.fs, &self.dir, &new)?;
@@ -342,13 +289,8 @@ fn write_manifest(fs: &dyn Storage, dir: &Path, version: &Version) -> Result<()>
     Ok(())
 }
 
-// --- Encoding -------------------------------------------------------------
-//
-// Layout (all little-endian):
-//   magic u64, format u32, next_seq u64, next_table_id u64, num_tiers u32,
-//   per tier: num_tables u32, per table: id u64, num_entries u64,
-//             first_len u32, first_key, last_len u32, last_key
-//   trailing crc32 over everything above.
+// Encoding Layout (all little-endian): magic u64, format u32, next_seq u64, next_table_id u64, num_tiers
+// u32, per tier: num_tables u32, per table: id u64, num_entries u64, first_len u32, first_key, last_len u32.
 
 fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_le_bytes());

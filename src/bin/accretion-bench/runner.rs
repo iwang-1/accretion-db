@@ -1,12 +1,5 @@
-//! The closed-loop workload driver: given a shared [`KvBench`] engine, run a
-//! fill/read/scan phase at a chosen concurrency, timing every operation into a
-//! per-thread [`Histogram`] and reporting throughput + latency percentiles.
-//!
-//! *Closed loop* means each worker issues the next operation only after the
-//! previous one returns — so throughput is `ops / wall_time` and latency is the
-//! real per-op service time, with no pipelining hiding the fsync cost. Criterion
-//! is the tool for single-op latency *distributions*; this driver is the tool
-//! for aggregate throughput under load (stated in the methodology).
+//! The closed-loop workload driver: given a shared [`KvBench`] engine, run a fill/read/scan phase at a
+//! chosen concurrency, timing every operation into a per-thread [`Histogram`] and reporting throughput + latency.
 
 use std::sync::Arc;
 use std::thread;
@@ -84,9 +77,8 @@ fn merge_hists(hists: Vec<Histogram>) -> Histogram {
     merged
 }
 
-/// Run the fill phase: write every index in the generated order, timing each
-/// `put`. The generated order is a pure function of `(order, n, seed)`, so
-/// concurrency only changes *who* writes an index, never *which* bytes.
+/// Run the fill phase: write every index in the generated order, timing each `put`. The generated order is
+/// a pure function of `(order, n, seed)`, so concurrency only changes *who* writes an index, never *which* bytes.
 pub fn run_fill<K>(
     engine: &Arc<K>,
     order: FillOrder,
@@ -133,9 +125,8 @@ where
     Ok(finish(phase, engine.label(), concurrency, secs, hists))
 }
 
-/// Run the point-read phase: look up `count` random keys, timing each `get`.
-/// Verifies each present value matches the deterministic expected bytes so a
-/// silently-wrong read cannot masquerade as fast.
+/// Run the point-read phase: look up `count` random keys, timing each `get`. Verifies each present value
+/// matches the deterministic expected bytes so a silently-wrong read cannot masquerade as fast.
 pub fn run_point_read<K>(
     engine: &Arc<K>,
     n: u64,

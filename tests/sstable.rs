@@ -1,12 +1,4 @@
 //! SSTable integration tests, exercised over the [`SimFs`] storage seam.
-//!
-//! Coverage: build/read roundtrip (single- and multi-block), sparse-index
-//! lookups across block boundaries, tombstone handling, strictly-increasing key
-//! enforcement, forward iteration, and corruption detection for every
-//! CRC-framed structure (data block, index, bloom, footer). A final case builds
-//! a table under an armed [`SimFs`] crash and confirms the durability contract:
-//! a table synced before the crash reads back intact; a table whose bytes never
-//! reached a `sync_file`/`sync_dir` does not masquerade as valid.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,9 +12,8 @@ fn dir() -> PathBuf {
     PathBuf::from("/sst")
 }
 
-/// Create a SimFs with the SSTable's parent directory already durably present,
-/// so a crash keeps the directory itself (the file's own durability is what the
-/// tests probe).
+/// Create a SimFs with the SSTable's parent directory already durably present, so a crash keeps the
+/// directory itself (the file's own durability is what the tests probe).
 fn fresh_fs() -> (Arc<SimFs>, Arc<dyn Storage>) {
     let sim = Arc::new(SimFs::with_seed(42));
     let fs: Arc<dyn Storage> = sim.clone();
@@ -212,9 +203,8 @@ fn truncated_file_detected() {
     }
 }
 
-/// The durability contract under a simulated power loss: a table whose
-/// `finish()` completed (issuing its `sync_file`) before the crash reads back
-/// intact. We arm the crash *after* the file is synced and installed.
+/// The durability contract under a simulated power loss: a table whose `finish()` completed (issuing its
+/// `sync_file`) before the crash reads back intact.
 #[test]
 fn survives_crash_after_sync() {
     let sim = Arc::new(SimFs::with_seed(9));

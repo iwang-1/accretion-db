@@ -1,6 +1,5 @@
-//! Unit + concurrency tests for the memtable set: byte accounting, overwrite
-//! semantics, atomic freeze, the frozen-list read guarantee, and freeze racing
-//! concurrent readers.
+//! Unit + concurrency tests for the memtable set: byte accounting, overwrite semantics, atomic freeze, the
+//! frozen-list read guarantee, and freeze racing concurrent readers.
 
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -156,10 +155,8 @@ fn range_snapshot_is_bounded_and_sorted() {
     assert_eq!(keys, vec![k("b"), k("c")]);
 }
 
-/// Freeze racing a swarm of concurrent readers: readers that keep querying a
-/// key written before any freeze must NEVER observe it as missing, no matter
-/// where the freeze lands relative to their reads. This is the core "frozen
-/// list keeps reads correct mid-flush" invariant, exercised under real threads.
+/// Freeze racing a swarm of concurrent readers: readers that keep querying a key written before any freeze
+/// must never observe it as missing, no matter where the freeze lands relative to their reads.
 #[test]
 fn concurrent_readers_never_miss_key_across_freeze() {
     let set = Arc::new(MemtableSet::new(1 << 30)); // never auto-freezes
@@ -202,9 +199,8 @@ fn concurrent_readers_never_miss_key_across_freeze() {
     );
 }
 
-/// Concurrent writers plus a freezing thread: after everything joins, every key
-/// each writer acknowledged must be resolvable. Guards against a freeze losing
-/// concurrently-inserted data.
+/// Concurrent writers plus a freezing thread: after everything joins, every key each writer acknowledged
+/// must be resolvable.
 #[test]
 fn concurrent_writers_and_freezer_lose_nothing() {
     let set = Arc::new(MemtableSet::new(1 << 30));

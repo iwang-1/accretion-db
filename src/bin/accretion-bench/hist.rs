@@ -1,11 +1,4 @@
-//! An exact latency histogram: record every sample, sort once, read
-//! percentiles off the sorted vector.
-//!
-//! We keep raw nanosecond samples rather than bucketing. A closed-loop run of
-//! 1M operations costs 8 MiB of `u64`s — trivial — and buys *exact* p50/p99
-//! rather than a bucket approximation, which matters for an honesty-first
-//! portfolio: the number printed is the number measured, not the nearest
-//! bucket edge. Percentiles use the nearest-rank method on the sorted samples.
+//! An exact latency histogram: record every sample, sort once, read percentiles off the sorted vector.
 
 /// Accumulates per-operation latencies (nanoseconds) for one workload phase.
 #[derive(Debug, Default)]
