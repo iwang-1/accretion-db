@@ -190,22 +190,43 @@ Readers pinned to an old `Arc<Version>` stay correct while compaction replaces
 files underneath them, because a file is only deleted once no `Version`
 references it.
 
-**Compaction runs synchronously by design in this version.** Both the flush
-path and each compaction pass derive their output table id from
-`next_table_id` on the version snapshot they started from and then call
-`Manifest::install`, which unconditionally swaps in the new version. Under a
-single logical writer this is race-free and keeps the crash-consistency reasoning
-tractable: every durable state transition is totally ordered, so the exhaustive
-crash sweep and proptest schedules reason about one linear history of manifest
-installs. Moving compaction onto a background thread would let two producers
-pick the same `next_table_id` (colliding output files) and let a compaction
-`install` clobber a concurrently flushed tier-0 table (acked-write loss) — i.e.
-it demands turning `install` into a transactional compare-and-apply and then
-re-establishing the crash invariant against interleaved installs. That rework is
-deliberately deferred: **background/concurrent compaction is future work.** The
-synchronous design costs write-path latency spikes when a large tier compacts,
-but buys a correctness story that is simple to inspect and audit, which is the
-point of this project.
+**Compaction is inline by default, and optionally on a background thread.**
+An earlier version could only compact inline, because both the flush path and
+each compaction pass took their output table id from `next_table_id` on the
+version snapshot they started from and then called `Manifest::install`, which
+unconditionally swapped in the new version. Under a single logical writer that
+was race-free; with two producers it would let them pick the same id (colliding
+output files) and let a compaction `install` clobber a concurrently flushed
+tier-0 table (acked-write loss). `Options::background_compaction` required
+removing both hazards, plus a third that only appeared once two threads ran:
+
+- **Ids come from one allocator.** `Manifest::alloc_table_id` hands out ids
+  under the manifest lock; every install advances the allocator past the ids
+  its version names.
+- **Installs are compare-and-apply.** `Manifest::install_with(change)` computes
+  the new version from the *current* one under a dedicated install lock. A
+  compaction removes exactly its input tables by id
+  (`Version::compacted_inputs`), so a table flushed into tier 0 while the merge
+  ran survives, and stays newer than the merge output.
+- **GC never deletes a table being written.** Allocated-but-uninstalled ids are
+  *pending* and count as live, and GC only deletes files whose id is below the
+  allocator position it recorded with its live set. Without that bound a flush
+  could create a table in the gap between GC's snapshot and its directory
+  listing and have it deleted (BUGS_FOUND.md #7, caught by a concurrency test
+  before the feature was committed).
+
+Only one compaction runs at a time, so a merge's "is the output the bottom
+tier" decision cannot be invalidated while it runs. A flush requests a pass and
+returns; it stalls only if tier 0 reaches `L0_STOP_FACTOR` (3) times the fanout,
+and then only until one merge brings it back under. `Db::flush()` waits for
+background work to settle, so callers observe the same final layout in both
+modes. A background failure is sticky: every later write and flush returns it.
+
+Inline remains the default because its storage-op order is deterministic, which
+the exhaustive crash sweep depends on. The background mode has its own crash
+sweep, which samples thread interleavings rather than enumerating them, a
+property test against the `BTreeMap` model, and a four-writer concurrency test
+(RESULTS.md §3d has the measured effect, including where it does not help).
 
 ## Why not mmap / io_uring / a block cache
 

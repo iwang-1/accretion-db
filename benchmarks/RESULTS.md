@@ -94,6 +94,37 @@ is a single write absorbing a full compaction merge on the writer's thread — t
 honest cost of the synchronous-compaction simplicity decision, published rather
 than hidden. Moving compaction to a background thread is documented future work.
 
+### 3d. Background compaction (B5)
+
+With `Options::background_compaction`, a flush writes its table and returns; a
+dedicated thread runs the size-tiered cascade. A flush stalls only if tier 0
+reaches 3x the fanout, and then only until one merge brings it back under. Same
+host as §4's scan update (Apple M3 Max, macOS 27, `rustc` 1.94.1, internal SSD),
+`fill-random` of 200,000 keys, `OsBuffered` (to isolate compaction from fsync),
+256 KiB memtable so the fill crosses many flushes and compactions, fresh directory
+per run, 3 runs per cell, medians:
+
+| writers | mode | ops/sec | p50 | p99 | max |
+|---:|---|---:|---:|---:|---:|
+| 1 | inline | 16,596 | 22.7 µs | 49.2 µs | 760 ms |
+| 1 | background | **19,427** | 23.0 µs | 63.4 µs | **208 ms** |
+| 8 | inline | 9,707 | 92.8 µs | 321 µs | 2,866 ms |
+| 8 | background | **11,112** | 92.2 µs | 416 µs | 2,808 ms |
+
+Raw: [`raw/b5_background_compaction_apple_m3max.txt`](raw/b5_background_compaction_apple_m3max.txt).
+
+**Reading it.** With one writer, moving the merge off the write path cut the
+worst write from 760 ms to 208 ms (3.7x) and raised throughput 17%; the median
+is unchanged, and p99 rose slightly (49 → 63 µs), plausibly from the compactor
+competing for the same cores and I/O. With eight writers, throughput rose 14%
+but the worst write did **not** improve (about 2.8 s either way) and p99 got
+worse: eight writers fill tier 0 faster than one compaction thread drains it,
+and a long merge deeper in the tree cannot be interrupted, so tier 0 reaches the
+stall limit behind it. A single compaction thread is the limit here; more
+compaction threads (or a separate tier-0 thread) are future work. An earlier
+version of the stall waited for the whole cascade to go idle rather than for
+tier 0 to drop below the limit; the table is the improved version.
+
 ### 3c. fill-seq (sequential keys)
 
 | workload | mode | throughput | matched fill-random peer |

@@ -201,6 +201,8 @@ layers test it:
 | layer | what it does | count |
 |---|---|---:|
 | Exhaustive deterministic sweep | Run a canonical mixed workload once to count `N` mutating storage ops; for each `i in 1..=N`, fresh `SimFs`, crash after op `i` (× 4 fixed seeds spanning 3 possible tear modes × 2 durable modes), reopen, verify against the acked-prefix model. | **330 points → 2,640 executions** |
+| Background compaction sweep | The canonical workload with a compaction thread running alongside the writer; crash after every op index of one counted run × 4 seeds × 2 durable modes, same acked-prefix verifier. Thread interleaving varies run to run, so this samples interleavings rather than enumerating them. A `SimFs` halt makes every mutation after the crash fail, from any thread (BUGS_FOUND.md #8). | **~340 points × 8 per run** |
+| Writable after recovery | The exhaustive sweep again, but after each recovery the verifier writes 40 keys and flushes, instead of only reading (BUGS_FOUND.md #6). | **every crash point × 4 seeds × 2 modes** |
 | Batch atomicity sweep | The canonical workload grouped into 14 `WriteBatch`es of 1–5 ops (so batches straddle memtable freezes, flushes, and compaction); the same crash-after-every-op × 4 seeds × 2 modes sweep, but the verifier compares the *entire* recovered key space against the two allowed whole-batch states. Mutation-checked: logging each op of a batch as its own WAL frame makes both sweeps fail on the first batch. | **182 points → 1,456 executions** |
 | Property-based schedules | proptest generates random op sequences × crash indices × durability modes, shrinking failures to minimal counterexamples; 3 named fixed-seed regressions pin the highest-risk shapes, and each one sweeps *every* crash point of its own workload × 4 seeds × 2 modes rather than running a single case. | **160 schedules + 3 regression sweeps** |
 | Real process kill | `accretion-crashtest` writes to a real `RealFs` DB in `Always`, prints each key only once its `put` returns durable; the parent sends `SIGKILL`, reopens against real filesystem calls, and confirms every acknowledged key is present *with its exact value*. The repeated test kills and reopens the **same directory** three times and, after the last round, re-verifies every key acked in *any* round — so recovery must hold across successive abrupt deaths. The kernel and page cache remain alive, so this tests abrupt process death, not hardware power loss or torn writes. | **1 single kill + 3 repeated rounds on one directory; ≥8 acked writes required per round; exact-value check; key counts vary with timing** |
@@ -274,10 +276,15 @@ deliberately deferred. The defense is written up in
 
 Stated plainly, each on purpose:
 
-- **Synchronous compaction.** When a tier crosses its fanout, the triggering
-  write absorbs the full merge latency (the multi-second stalls in RESULTS.md
-  §3b). Bought simple, auditable crash reasoning; background compaction is future
-  work.
+- **One compaction thread.** By default compaction runs inline: the write that
+  crosses a tier's fanout absorbs the merge (the multi-second stalls in
+  RESULTS.md §3b). `Options::background_compaction` moves it to a dedicated
+  thread: with one writer the worst write fell from 760 ms to 208 ms and
+  throughput rose 17%, but with eight writers the single thread falls behind,
+  tier 0 hits the stall limit behind long deep merges, and the worst write stays
+  near 2.8 s (RESULTS.md §3d). Multiple compaction threads are future work.
+  Inline stays the default because it is deterministic, which the exhaustive
+  crash sweep relies on.
 - **Size-tiered only.** Lower write amplification and simpler invariants, at the
   cost of higher space/read amplification — the honest tiered-vs-leveled tradeoff
   (DESIGN_NOTES.md). No leveled compaction.

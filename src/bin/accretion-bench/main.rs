@@ -38,6 +38,7 @@ struct Config {
     reads: usize,
     concurrency: usize,
     memtable_bytes: usize,
+    background_compaction: bool,
     dir: Option<PathBuf>,
     seed: u64,
 }
@@ -52,6 +53,7 @@ impl Default for Config {
             reads: 0, // 0 => default to keys
             concurrency: 1,
             memtable_bytes: 4 * 1024 * 1024,
+            background_compaction: false,
             dir: None,
             seed: 0x5eed,
         }
@@ -113,6 +115,7 @@ fn parse_flags(args: &[String], mut cfg: Config) -> BenchResult<Config> {
                     .parse()
                     .map_err(|e| format!("--memtable-bytes: {e}"))?
             }
+            "--background-compaction" => cfg.background_compaction = true,
             "--dir" => cfg.dir = Some(PathBuf::from(value()?)),
             "--seed" => cfg.seed = value()?.parse().map_err(|e| format!("--seed: {e}"))?,
             other => return Err(format!("unknown flag {other:?}").into()),
@@ -157,13 +160,14 @@ fn run(args: &[String]) -> BenchResult<()> {
 
     println!(
         "# accretion-bench engine={:?} durability={:?} keys={} reads={} concurrency={} \
-         memtable={}B seed={} dir={}",
+         memtable={}B background_compaction={} seed={} dir={}",
         cfg.engine,
         cfg.durability,
         cfg.keys,
         cfg.reads,
         cfg.concurrency,
         cfg.memtable_bytes,
+        cfg.background_compaction,
         cfg.seed,
         dir.display()
     );
@@ -178,6 +182,7 @@ fn run(args: &[String]) -> BenchResult<()> {
                 &dir,
                 cfg.durability,
                 cfg.memtable_bytes,
+                cfg.background_compaction,
             )?);
             run_workload(&cfg, &engine)?
         }

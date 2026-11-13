@@ -171,6 +171,7 @@ pub fn run_crash(
         None => sim.crash(),
     };
 
+    sim.resume();
     let recovered: Arc<dyn Storage> = sim;
     verify(recovered, &report);
     report

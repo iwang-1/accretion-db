@@ -30,6 +30,7 @@ fn child_opts() -> Options {
         durability: Durability::Always,
         memtable_size: 4 * 1024,
         tier_fanout: 4,
+        ..Default::default()
     }
 }
 

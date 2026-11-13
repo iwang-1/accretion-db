@@ -176,36 +176,39 @@ fn compact_tier(
         sources.push(Box::new(entries.into_iter()));
     }
 
+    // Only one compaction runs at a time, so no other thread can add a tier below `t + 1` while this
+    // one runs: the bottom-tier decision made on this snapshot stays true at install.
     let drop_tombstones = output_is_bottom(version, t);
-    let out_id = version.next_table_id;
+    let out_id = manifest.alloc_table_id();
     let out_path = table_path(manifest.dir(), out_id);
 
     // Newest-wins merge; at the bottom tier, physically drop tombstones.
     let merged =
         MergeIterator::new(sources).filter(|(_, v)| !(drop_tombstones && v.is_tombstone()));
 
-    let output = write_table(
+    let output = match write_table(
         Arc::clone(storage),
         &out_path,
         out_id,
         expected_keys,
         merged,
-    )?;
-
-    // Install the new version. If the merge produced no live entries (everything was tombstoned away at the
-    // bottom tier) the output table is dropped and the tier is simply cleared.
-    let new_version = match output {
-        Some(meta) => version.compacted(t, meta),
-        None => {
-            let mut v = version.clone();
-            v.tiers[t].clear();
-            while matches!(v.tiers.last(), Some(tier) if tier.is_empty()) {
-                v.tiers.pop();
-            }
-            v
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            manifest.release_table_id(out_id);
+            return Err(e);
         }
     };
-    manifest.install(new_version)?;
+    if output.is_none() {
+        manifest.release_table_id(out_id);
+    }
+
+    // Install against the *current* version, not the snapshot the inputs came from: a flush may have
+    // added tables to tier 0 meanwhile, and they must survive. Only the input tables are removed. If the
+    // merge produced no live entries (everything was tombstoned away at the bottom tier) there is no
+    // output table.
+    let input_ids: std::collections::BTreeSet<u64> = inputs.iter().map(|m| m.id).collect();
+    manifest.install_with(|current| current.compacted_inputs(t, &input_ids, output))?;
     Ok(())
 }
 

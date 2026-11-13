@@ -18,6 +18,7 @@ fn small_opts(durability: Durability) -> Options {
         durability,
         memtable_size: 256,
         tier_fanout: 4,
+        ..Default::default()
     }
 }
 
@@ -306,6 +307,7 @@ fn scan_matches_model_for_every_bound_kind() {
         durability: Durability::OsBuffered,
         memtable_size: 16 * 1024, // several tables, each with several 4 KiB blocks
         tier_fanout: 1000,        // no compaction, so the tables stay separate and overlap
+        ..Default::default()
     };
     let db = open_sim(fs, opts);
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
@@ -382,5 +384,75 @@ fn scan_matches_model_for_every_bound_kind() {
                 .collect();
             assert_eq!(got, expected, "boundary scan({range:?})");
         }
+    }
+}
+
+// ---- Background compaction ----
+
+/// Several writer threads against background compaction: every write lands, compaction keeps up
+/// (no tier left at or above the fanout once flushed), and reads match a model throughout.
+#[test]
+fn background_compaction_with_concurrent_writers_matches_model() {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    for mode in [Durability::OsBuffered, Durability::GroupCommit] {
+        let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(31));
+        let opts = Options {
+            durability: mode,
+            memtable_size: 512,
+            tier_fanout: 4,
+            background_compaction: true,
+        };
+        let db = Arc::new(open_sim(Arc::clone(&fs), opts.clone()));
+        let model = Arc::new(Mutex::new(BTreeMap::new()));
+        let writers: Vec<_> = (0..4u32)
+            .map(|w| {
+                let db = Arc::clone(&db);
+                let model = Arc::clone(&model);
+                std::thread::spawn(move || {
+                    for i in 0..600u32 {
+                        // Disjoint key ranges per writer, so the model needs no ordering between threads.
+                        let key = format!("w{w}-k{:03}", i % 150).into_bytes();
+                        if i % 7 == 3 {
+                            db.delete(&key).unwrap();
+                            model.lock().unwrap().remove(&key);
+                        } else {
+                            let val = format!("w{w}-v{i}").into_bytes();
+                            db.put(&key, &val).unwrap();
+                            model.lock().unwrap().insert(key, val);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        db.flush().unwrap();
+        let version = db.debug_version();
+        assert!(version.num_tiers() >= 2, "{mode:?}: compaction never ran");
+        for t in 0..version.num_tiers() {
+            assert!(
+                version.tier_len(t) < 4,
+                "{mode:?}: tier {t} left over the fanout"
+            );
+        }
+        let model = model.lock().unwrap();
+        let scanned: Vec<(Vec<u8>, Vec<u8>)> = db.scan(..).unwrap().collect();
+        let expected: Vec<(Vec<u8>, Vec<u8>)> =
+            model.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        assert_eq!(scanned, expected, "{mode:?}");
+        drop(db);
+        // Reopen (inline mode) and check again: what the background thread installed is durable.
+        let db = open_sim(
+            fs,
+            Options {
+                background_compaction: false,
+                ..opts
+            },
+        );
+        let scanned: Vec<(Vec<u8>, Vec<u8>)> = db.scan(..).unwrap().collect();
+        assert_eq!(scanned, expected, "{mode:?} after reopen");
     }
 }

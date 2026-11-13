@@ -56,11 +56,18 @@ fn modes() -> [Durability; 3] {
 /// Apply `ops` to a fresh engine (in `mode`) and an in-memory `BTreeMap` model,
 /// asserting the two agree on every read and scan.
 fn run_against_model(ops: &[Op], mode: Durability, seed: u64) {
+    run_against_model_with(ops, mode, seed, false);
+}
+
+/// As [`run_against_model`], choosing inline or background compaction. With background compaction,
+/// merges run on another thread while the ops execute, so reads and scans race real compactions.
+fn run_against_model_with(ops: &[Op], mode: Durability, seed: u64, background: bool) {
     let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(seed));
     let opts = Options {
         durability: mode,
         memtable_size: 128, // tiny: force frequent freezes/flushes/compactions
         tier_fanout: 4,
+        background_compaction: background,
     };
     let db = Db::open_on(fs, std::path::Path::new("/db"), opts).expect("open db");
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
@@ -124,6 +131,16 @@ proptest! {
     ) {
         for mode in modes() {
             run_against_model(&ops, mode, seed);
+        }
+    }
+
+    #[test]
+    fn engine_with_background_compaction_matches_btreemap_model(
+        ops in proptest::collection::vec(op_strategy(), 1..200),
+        seed in any::<u64>(),
+    ) {
+        for mode in modes() {
+            run_against_model_with(&ops, mode, seed, true);
         }
     }
 }

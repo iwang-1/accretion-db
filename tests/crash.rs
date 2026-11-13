@@ -27,6 +27,7 @@ fn opts(durability: Durability) -> Options {
         durability,
         memtable_size: 128,
         tier_fanout: 4,
+        ..Default::default()
     }
 }
 
@@ -679,5 +680,69 @@ mod orphan_table_after_crash {
             .expect("flush must not trip over the orphan file");
         assert_eq!(db.get(b"k00").unwrap(), Some(b"value-before".to_vec()));
         assert_eq!(db.get(b"n39").unwrap(), Some(b"value-after".to_vec()));
+    }
+}
+
+/// The acked-write invariant with background compaction on. A compaction thread interleaves its
+/// storage ops with the writer's, so op order (and so what each crash point interrupts) varies between
+/// runs: this sweeps every op index of one counted run, under every seed, and checks the same
+/// zero-acknowledged-write-loss invariant as the deterministic sweep on each recovered image.
+mod background_compaction {
+    use super::*;
+
+    fn bg_opts(mode: Durability) -> Options {
+        Options {
+            background_compaction: true,
+            ..opts(mode)
+        }
+    }
+
+    fn run_bg(fs: Arc<dyn Storage>, mode: Durability, ops: &[Op], acked: &AtomicUsize) {
+        let db = Db::open_on(fs, Path::new(DIR), bg_opts(mode)).expect("open db");
+        for op in ops {
+            match op {
+                Op::Put(k, v) => db.put(k, v).expect("put"),
+                Op::Delete(k) => db.delete(k).expect("delete"),
+            }
+            acked.fetch_add(1, Ordering::SeqCst);
+        }
+        // Settle background compaction so the last merges are also exposed to the crash point.
+        db.flush().expect("flush");
+    }
+
+    fn sweep(mode: Durability) -> u64 {
+        let ops = canonical_ops();
+        let sim = Arc::new(SimFs::with_seed(0));
+        let fs: Arc<dyn Storage> = sim.clone();
+        run_bg(fs, mode, &ops, &AtomicUsize::new(0));
+        let n = sim.op_count();
+        for i in 1..=n {
+            for &seed in &[1u64, 7, 42, 1234] {
+                let acked = Arc::new(AtomicUsize::new(0));
+                let acked_body = Arc::clone(&acked);
+                let (ops_body, ops_verify) = (ops.clone(), ops.clone());
+                run_crash(
+                    seed,
+                    i,
+                    move |fs| run_bg(fs, mode, &ops_body, &acked_body),
+                    move |fs, report| {
+                        verify(fs, mode, &ops_verify, acked.load(Ordering::SeqCst), report)
+                    },
+                );
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn always_zero_acked_loss_with_background_compaction() {
+        let n = sweep(Durability::Always);
+        println!("BG-CRASH-SWEEP Always: N={n} crash points x 4 seeds");
+    }
+
+    #[test]
+    fn group_commit_zero_acked_loss_with_background_compaction() {
+        let n = sweep(Durability::GroupCommit);
+        println!("BG-CRASH-SWEEP GroupCommit: N={n} crash points x 4 seeds");
     }
 }

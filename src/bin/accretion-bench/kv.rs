@@ -43,11 +43,17 @@ pub struct AccretionBench {
 
 impl AccretionBench {
     /// Open an accretion-db instance on the real filesystem at `dir`.
-    pub fn open(dir: &Path, durability: Durability, memtable_size: usize) -> BenchResult<Self> {
+    pub fn open(
+        dir: &Path,
+        durability: Durability,
+        memtable_size: usize,
+        background_compaction: bool,
+    ) -> BenchResult<Self> {
         let opts = Options {
             durability,
             memtable_size,
             tier_fanout: 4,
+            background_compaction,
         };
         let db = Db::open(dir, opts).map_err(|e| boxed(format!("accretion open: {e}")))?;
         Ok(AccretionBench { db, durability })
@@ -66,6 +72,7 @@ impl AccretionBench {
             durability,
             memtable_size,
             tier_fanout: 4,
+            ..Default::default()
         };
         let db =
             Db::open_on(storage, dir, opts).map_err(|e| boxed(format!("accretion open: {e}")))?;

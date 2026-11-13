@@ -43,6 +43,7 @@ fn write_loop(dir: &str) -> ExitCode {
         durability: Durability::Always,
         memtable_size: 4 * 1024, // small: force flushes + compaction quickly
         tier_fanout: 4,
+        ..Default::default()
     };
     let db = match Db::open(Path::new(dir), opts) {
         Ok(db) => db,
@@ -78,6 +79,7 @@ fn verify(dir: &str) -> ExitCode {
         durability: Durability::Always,
         memtable_size: 4 * 1024,
         tier_fanout: 4,
+        ..Default::default()
     };
     let db = match Db::open(Path::new(dir), opts) {
         Ok(db) => db,

@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::storage::{Storage, StorageError};
@@ -135,6 +136,31 @@ impl Version {
         v
     }
 
+    /// Derive a new version in which the tables `inputs` (all from tier `t`) are removed and the merged
+    /// `output`, if any, is appended to tier `t + 1`. Tables that reached tier `t` after the compaction
+    /// chose its inputs (a concurrent flush into tier 0) stay where they are, newer than the output.
+    pub fn compacted_inputs(
+        &self,
+        t: usize,
+        inputs: &BTreeSet<u64>,
+        output: Option<TableMeta>,
+    ) -> Version {
+        let mut v = self.clone();
+        while v.tiers.len() <= t + 1 {
+            v.tiers.push(Vec::new());
+        }
+        v.tiers[t].retain(|table| !inputs.contains(&table.id));
+        if let Some(output) = output {
+            let id = output.id;
+            v.tiers[t + 1].push(Arc::new(output));
+            v.next_table_id = v.next_table_id.max(id + 1);
+        }
+        while matches!(v.tiers.last(), Some(tier) if tier.is_empty()) {
+            v.tiers.pop();
+        }
+        v
+    }
+
     /// Derive a new version in which every table of tier `t` is replaced by the single merged `output`
     /// table placed at tier `t + 1` — the size-tiered compaction step.
     pub fn compacted(&self, t: usize, output: TableMeta) -> Version {
@@ -167,6 +193,10 @@ pub struct Manifest {
     fs: Arc<dyn Storage>,
     dir: PathBuf,
     inner: Mutex<Inner>,
+    /// Serializes version changes so each one is computed from the version it replaces.
+    install_lock: Mutex<()>,
+    /// Next table file id to hand out. Shared by flush and compaction, which may run concurrently.
+    next_table_id: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -174,6 +204,11 @@ struct Inner {
     current: Arc<Version>,
     /// Superseded versions retained until no reader pins them.
     obsolete: Vec<Arc<Version>>,
+    /// Table ids handed out by [`Manifest::alloc_table_id`] whose file may be on disk but which no
+    /// installed version names yet (a flush or compaction is still writing them). GC must not delete
+    /// these: with background compaction, one writer's install would otherwise delete the table the
+    /// other is still writing.
+    pending: BTreeSet<u64>,
 }
 
 impl Manifest {
@@ -192,20 +227,24 @@ impl Manifest {
             write_manifest(&*fs, dir, &v)?;
             v
         };
+        let next_table_id = AtomicU64::new(current.next_table_id);
         let manifest = Manifest {
             fs,
             dir: dir.to_path_buf(),
             inner: Mutex::new(Inner {
                 current: Arc::new(current),
                 obsolete: Vec::new(),
+                pending: BTreeSet::new(),
             }),
+            install_lock: Mutex::new(()),
+            next_table_id,
         };
         // Reclaim table files the recovered manifest does not name. A crash between writing a table and
         // installing the manifest that names it can leave such a file on a real filesystem, which may
         // persist a directory entry without an explicit directory sync. Its id is the one this manifest
         // hands out next, so left in place it would make the next flush fail with AlreadyExists. Nothing
         // can reference an unlisted table at open, so deleting it is safe.
-        manifest.gc()?;
+        manifest.gc_files(false)?;
         Ok(manifest)
     }
 
@@ -220,9 +259,53 @@ impl Manifest {
         Arc::clone(&self.inner.lock().expect("manifest poisoned").current)
     }
 
+    /// Reserve a table file id. Ids are never reused within a process, and every installed version
+    /// records an id past each table it names, so a reopened manifest resumes past them too.
+    /// The id stays protected from GC until a version naming it is installed or it is released with
+    /// [`Manifest::release_table_id`].
+    pub fn alloc_table_id(&self) -> u64 {
+        let mut inner = self.inner.lock().expect("manifest poisoned");
+        let id = self.next_table_id.fetch_add(1, Ordering::Relaxed);
+        inner.pending.insert(id);
+        id
+    }
+
+    /// Give up an id from [`Manifest::alloc_table_id`] without installing it (the table came out empty,
+    /// or writing it failed), so GC can reclaim any file written under it.
+    pub fn release_table_id(&self, id: u64) {
+        self.inner
+            .lock()
+            .expect("manifest poisoned")
+            .pending
+            .remove(&id);
+    }
+
+    /// Durably install the version `change` derives from the current one. Version changes are
+    /// serialized, so a flush and a compaction running at the same time cannot overwrite each other:
+    /// each sees the other's result.
+    pub fn install_with(&self, change: impl FnOnce(&Version) -> Version) -> Result<Arc<Version>> {
+        let _serial = self
+            .install_lock
+            .lock()
+            .expect("manifest install lock poisoned");
+        let new = change(&self.current());
+        self.install_unserialized(new)
+    }
+
     /// Durably install `new` as the current version, then delete any table file no longer referenced by a
-    /// live version.
+    /// live version. Prefer [`Manifest::install_with`] when another thread may also change the version.
     pub fn install(&self, new: Version) -> Result<Arc<Version>> {
+        let _serial = self
+            .install_lock
+            .lock()
+            .expect("manifest install lock poisoned");
+        self.install_unserialized(new)
+    }
+
+    fn install_unserialized(&self, new: Version) -> Result<Arc<Version>> {
+        // Keep the allocator past every id an installed version accounts for, whoever built it.
+        self.next_table_id
+            .fetch_max(new.next_table_id, Ordering::Relaxed);
         // 1. Persist the new manifest durably (tmp + sync_file + rename + sync_dir).
         write_manifest(&*self.fs, &self.dir, &new)?;
 
@@ -230,6 +313,9 @@ impl Manifest {
         let new_arc = Arc::new(new);
         {
             let mut inner = self.inner.lock().expect("manifest poisoned");
+            for id in new_arc.referenced_ids() {
+                inner.pending.remove(&id);
+            }
             let prev = std::mem::replace(&mut inner.current, Arc::clone(&new_arc));
             inner.obsolete.push(prev);
         }
@@ -242,23 +328,40 @@ impl Manifest {
     /// Delete SSTable files that no live version (current or a still-pinned
     /// obsolete one) references. Called after every install; safe to call anytime.
     fn gc(&self) -> Result<()> {
+        self.gc_files(true)
+    }
+
+    /// Delete unreferenced table files. With `only_allocated`, files whose id was handed out after the
+    /// live set was computed are left alone: another thread may have allocated that id and be writing
+    /// the file between this snapshot and the directory listing below. Without it (at open, before
+    /// anything can allocate), every unreferenced table file is deleted, including an orphan under the
+    /// id the allocator will hand out next.
+    fn gc_files(&self, only_allocated: bool) -> Result<()> {
         // Compute the set of ids still referenced, dropping obsolete versions
         // that no reader pins any more (strong_count == 1 means only our vec).
-        let live_ids = {
+        let (live_ids, allocated_below) = {
             let mut inner = self.inner.lock().expect("manifest poisoned");
             inner.obsolete.retain(|v| Arc::strong_count(v) > 1);
             let mut ids = inner.current.referenced_ids();
             for v in &inner.obsolete {
                 ids.extend(v.referenced_ids());
             }
-            ids
+            ids.extend(inner.pending.iter().copied());
+            // Read under the same lock `alloc_table_id` takes, so every id below this bound is either
+            // in `ids` or no longer wanted by anyone.
+            let bound = if only_allocated {
+                self.next_table_id.load(Ordering::Relaxed)
+            } else {
+                u64::MAX
+            };
+            (ids, bound)
         };
 
         // Any *.sst file on disk not in the live set is garbage.
         let mut deleted_any = false;
         for entry in self.fs.list(&self.dir)? {
             if let Some(id) = parse_table_id(&entry) {
-                if !live_ids.contains(&id) {
+                if id < allocated_below && !live_ids.contains(&id) {
                     // A crash before the sync_dir simply leaves the file to be
                     // reclaimed by the next GC — deletion is idempotent.
                     self.fs.delete(&entry)?;

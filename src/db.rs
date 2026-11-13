@@ -28,7 +28,17 @@ pub struct Options {
     pub memtable_size: usize,
     /// Number of tables a tier accumulates before it is compacted down.
     pub tier_fanout: usize,
+    /// Run size-tiered compaction on a background thread instead of inside the write that triggered
+    /// it. A flush then only writes its table and returns; the merge happens off the write path. If
+    /// tier 0 reaches [`L0_STOP_FACTOR`] times the fanout, a flush waits for the compactor to catch
+    /// up, bounding read amplification. Off by default: inline compaction is deterministic, which
+    /// the exhaustive crash sweep relies on.
+    pub background_compaction: bool,
 }
+
+/// With background compaction, a flush waits for the compactor once tier 0 holds this many times
+/// `tier_fanout` tables (the write stall that bounds read amplification).
+pub const L0_STOP_FACTOR: usize = 3;
 
 impl Default for Options {
     fn default() -> Self {
@@ -36,6 +46,7 @@ impl Default for Options {
             durability: Durability::default(),
             memtable_size: DEFAULT_MEMTABLE_SIZE,
             tier_fanout: DEFAULT_TIER_FANOUT,
+            background_compaction: false,
         }
     }
 }
@@ -51,6 +62,9 @@ pub enum DbError {
     Manifest(ManifestError),
     /// An error during a flush or compaction.
     Compaction(CompactionError),
+    /// A background compaction failed. The engine reports it on every later write and flush rather
+    /// than continuing to accumulate tables it can no longer merge.
+    BackgroundCompaction(String),
 }
 
 impl std::fmt::Display for DbError {
@@ -60,6 +74,7 @@ impl std::fmt::Display for DbError {
             DbError::SsTable(e) => write!(f, "sstable error: {e}"),
             DbError::Manifest(e) => write!(f, "manifest error: {e}"),
             DbError::Compaction(e) => write!(f, "compaction error: {e}"),
+            DbError::BackgroundCompaction(e) => write!(f, "background compaction failed: {e}"),
         }
     }
 }
@@ -151,7 +166,9 @@ pub struct Db {
     options: Options,
     wal: Wal,
     memtables: MemtableSet,
-    manifest: Manifest,
+    manifest: Arc<Manifest>,
+    /// The background compaction thread, when [`Options::background_compaction`] is set.
+    compactor: Option<Compactor>,
     /// Immutable-per-id SSTable reader cache (a file id is never reused).
     readers: RwLock<HashMap<u64, Arc<SsTableReader>>>,
     write: Mutex<WriteState>,
@@ -206,6 +223,14 @@ impl Db {
             }
         }
 
+        let manifest = Arc::new(manifest);
+        let compactor = options.background_compaction.then(|| {
+            Compactor::spawn(
+                Arc::clone(&storage),
+                Arc::clone(&manifest),
+                options.tier_fanout,
+            )
+        });
         Ok(Db {
             storage,
             dir: dir.to_path_buf(),
@@ -213,6 +238,7 @@ impl Db {
             wal,
             memtables,
             manifest,
+            compactor,
             readers: RwLock::new(HashMap::new()),
             write: Mutex::new(WriteState {
                 next_seq,
@@ -249,6 +275,9 @@ impl Db {
     /// consecutive sequence numbers in order.
     fn write(&self, ops: &[(Vec<u8>, ValueKind)]) -> Result<()> {
         debug_assert!(!ops.is_empty());
+        if let Some(c) = &self.compactor {
+            c.check()?;
+        }
         let count = ops.len() as u64;
         // Phase 1: claim the seqs under the lock, then release it before the append.
         let first_seq = {
@@ -368,7 +397,13 @@ impl Db {
     /// cascade compaction. A no-op if there is nothing buffered.
     pub fn flush(&self) -> Result<()> {
         let ws = self.write.lock().expect("db write lock poisoned");
-        self.flush_locked(ws)
+        self.flush_locked(ws)?;
+        // An explicit flush also settles background compaction, so callers (and tests) observe the
+        // same final layout in both modes.
+        if let Some(c) = &self.compactor {
+            c.wait_idle()?;
+        }
+        Ok(())
     }
 
     /// Freeze the active memtable (if non-empty), flush every frozen table to a new tier-0 SSTable under
@@ -398,8 +433,7 @@ impl Db {
         // Flush each frozen table oldest-first, installing a manifest version per
         // table. Holding the write lock means no new frozen tables appear here.
         for frozen in self.memtables.frozen() {
-            let version = self.manifest.current();
-            let id = version.next_table_id;
+            let id = self.manifest.alloc_table_id();
             let mut entries = frozen.snapshot();
             let n = entries.len();
             // snapshot() is already key-sorted; hand it straight to the writer.
@@ -409,12 +443,20 @@ impl Db {
                 id,
                 n,
                 std::mem::take(&mut entries),
-            )?;
-            if let Some(meta) = table {
-                // Persist the current write clock so recovery resumes seq numbers
-                // past every flushed record.
-                let new_version = version.flushed(meta, ws.next_seq);
-                self.manifest.install(new_version)?;
+            );
+            match table {
+                Ok(Some(meta)) => {
+                    // Persist the current write clock so recovery resumes seq numbers
+                    // past every flushed record.
+                    let next_seq = ws.next_seq;
+                    self.manifest
+                        .install_with(|current| current.flushed(meta, next_seq))?;
+                }
+                Ok(None) => self.manifest.release_table_id(id),
+                Err(e) => {
+                    self.manifest.release_table_id(id);
+                    return Err(e.into());
+                }
             }
             // The table's contents are now durable (or it was empty); drop the
             // frozen buffer from the read set.
@@ -425,8 +467,26 @@ impl Db {
         // future recovery does not replay already-flushed data. Active is empty.
         self.wal.reset()?;
 
-        // Cascade size-tiered compaction until no tier is over the fanout.
-        while compaction::maybe_compact(&self.storage, &self.manifest, self.options.tier_fanout)? {}
+        match &self.compactor {
+            // Cascade size-tiered compaction until no tier is over the fanout.
+            None => {
+                while compaction::maybe_compact(
+                    &self.storage,
+                    &self.manifest,
+                    self.options.tier_fanout,
+                )? {}
+            }
+            Some(c) => {
+                c.request();
+                // Write stall: if tier 0 has piled up far past the fanout, wait (with the write
+                // path held) until the compactor brings it back under the limit — one tier-0 merge,
+                // not the whole cascade — so read amplification stays bounded.
+                let limit = self.options.tier_fanout * L0_STOP_FACTOR;
+                if self.manifest.current().tier_len(0) >= limit {
+                    c.wait_until(|| self.manifest.current().tier_len(0) < limit)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -523,6 +583,145 @@ fn range_contains<R: RangeBounds<Vec<u8>>>(range: &R, key: &[u8]) -> bool {
         Bound::Excluded(e) => key < e.as_slice(),
     };
     after_start && before_end
+}
+
+/// Shared between the engine and its compaction thread.
+#[derive(Debug, Default)]
+struct CompactorState {
+    /// A flush asked for a compaction pass that has not started yet.
+    requested: bool,
+    /// A compaction pass is in progress.
+    running: bool,
+    /// The engine is closing: the thread exits after any pass in progress.
+    shutdown: bool,
+    /// The first background compaction failure, reported by every later write and flush.
+    error: Option<String>,
+}
+
+/// The background compaction thread for [`Options::background_compaction`]. Each pass runs the same
+/// size-tiered cascade as inline mode, through [`Manifest::install_with`], so it composes with
+/// concurrent flushes.
+#[derive(Debug)]
+struct Compactor {
+    shared: Arc<(Mutex<CompactorState>, Condvar)>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Compactor {
+    fn spawn(storage: Arc<dyn Storage>, manifest: Arc<Manifest>, tier_fanout: usize) -> Compactor {
+        let shared = Arc::new((Mutex::new(CompactorState::default()), Condvar::new()));
+        let thread_shared = Arc::clone(&shared);
+        let handle = std::thread::Builder::new()
+            .name("accretion-compactor".into())
+            .spawn(move || {
+                let (lock, cv) = &*thread_shared;
+                loop {
+                    {
+                        let mut st = lock.lock().expect("compactor lock poisoned");
+                        while !st.requested && !st.shutdown {
+                            st = cv.wait(st).expect("compactor lock poisoned");
+                        }
+                        if st.shutdown {
+                            return;
+                        }
+                        st.requested = false;
+                        st.running = true;
+                    }
+                    let mut outcome = Ok(());
+                    loop {
+                        match compaction::maybe_compact(&storage, &manifest, tier_fanout) {
+                            Ok(true) => {
+                                // Wake writers stalled on tier 0 after every merge, not only when
+                                // the whole cascade is done.
+                                let _guard = lock.lock().expect("compactor lock poisoned");
+                                cv.notify_all();
+                                continue;
+                            }
+                            Ok(false) => break,
+                            Err(e) => {
+                                outcome = Err(e.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    let mut st = lock.lock().expect("compactor lock poisoned");
+                    st.running = false;
+                    if let Err(e) = outcome {
+                        st.error.get_or_insert(e);
+                    }
+                    cv.notify_all();
+                }
+            })
+            .expect("spawn compaction thread");
+        Compactor {
+            shared,
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    /// Ask for a compaction pass (no-op if one is already queued).
+    fn request(&self) {
+        let (lock, cv) = &*self.shared;
+        lock.lock().expect("compactor lock poisoned").requested = true;
+        cv.notify_all();
+    }
+
+    /// Return the background failure, if any.
+    fn check(&self) -> Result<()> {
+        let st = self.shared.0.lock().expect("compactor lock poisoned");
+        match &st.error {
+            Some(e) => Err(DbError::BackgroundCompaction(e.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Block until `ready` holds (re-checked after every compaction pass) or a background failure is
+    /// recorded, which is returned.
+    fn wait_until(&self, ready: impl Fn() -> bool) -> Result<()> {
+        let (lock, cv) = &*self.shared;
+        let mut st = lock.lock().expect("compactor lock poisoned");
+        while !ready() && st.error.is_none() {
+            if !st.running && !st.requested {
+                // Nothing in progress could make `ready` true; ask for a pass.
+                st.requested = true;
+                cv.notify_all();
+            }
+            st = cv.wait(st).expect("compactor lock poisoned");
+        }
+        match &st.error {
+            Some(e) => Err(DbError::BackgroundCompaction(e.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Block until no pass is queued or running, then report any background failure.
+    fn wait_idle(&self) -> Result<()> {
+        let (lock, cv) = &*self.shared;
+        let mut st = lock.lock().expect("compactor lock poisoned");
+        while (st.requested || st.running) && st.error.is_none() {
+            st = cv.wait(st).expect("compactor lock poisoned");
+        }
+        match &st.error {
+            Some(e) => Err(DbError::BackgroundCompaction(e.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Compactor {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.shared;
+        lock.lock().expect("compactor lock poisoned").shutdown = true;
+        cv.notify_all();
+        if let Some(h) = self
+            .handle
+            .lock()
+            .expect("compactor handle poisoned")
+            .take()
+        {
+            let _ = h.join();
+        }
+    }
 }
 
 // WAL record codec. A WAL payload is either one logical mutation:

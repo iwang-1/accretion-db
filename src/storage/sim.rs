@@ -85,6 +85,10 @@ struct SimState {
     next_append_seq: u64,
     /// When `Some(n)`, a crash fires automatically once `op_count` reaches `n`.
     crash_after: Option<u64>,
+    /// Set when an armed crash fires: the simulated process is dead, so every later mutating op fails,
+    /// from any thread, until [`SimFs::resume`]. Checked under the state lock, so no op can slip in
+    /// between the crash and the halt.
+    halted: bool,
     /// The report from the most recent crash, if one has occurred.
     last_report: Option<CrashReport>,
     /// Deterministic RNG driving crash tear decisions.
@@ -109,6 +113,7 @@ impl SimFs {
                 op_count: 0,
                 next_append_seq: 0,
                 crash_after: None,
+                halted: false,
                 last_report: None,
                 rng: StdRng::seed_from_u64(config.seed),
             }),
@@ -250,7 +255,24 @@ impl SimFs {
         st.op_count += 1;
         if matches!(st.crash_after, Some(n) if st.op_count >= n) {
             Self::crash_locked(st);
+            st.halted = true;
         }
+    }
+
+    /// Fail a mutating op issued after an armed crash halted the simulated process.
+    fn check_live(st: &SimState, path: &Path) -> StorageResult<()> {
+        if st.halted {
+            return Err(StorageError::Io {
+                path: path.to_path_buf(),
+                message: "simulated power loss: process halted after crash".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Allow mutating ops again after an armed crash, for the recovery that follows it.
+    pub fn resume(&self) {
+        self.state.lock().expect("simfs poisoned").halted = false;
     }
 
     fn collect_unreferenced_inodes(st: &mut SimState) {
@@ -273,6 +295,7 @@ fn is_child_of(path: &Path, dir: &Path) -> bool {
 impl Storage for SimFs {
     fn create(&self, path: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, path)?;
         if st
             .files
             .get(path)
@@ -301,6 +324,7 @@ impl Storage for SimFs {
 
     fn append(&self, path: &Path, data: &[u8]) -> StorageResult<u64> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, path)?;
         let inode_id = st
             .files
             .get(path)
@@ -321,6 +345,7 @@ impl Storage for SimFs {
 
     fn write_at(&self, path: &Path, offset: u64, data: &[u8]) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, path)?;
         let inode_id = st
             .files
             .get(path)
@@ -367,6 +392,7 @@ impl Storage for SimFs {
 
     fn sync_file(&self, path: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, path)?;
         let inode_id = st
             .files
             .get(path)
@@ -381,6 +407,7 @@ impl Storage for SimFs {
 
     fn sync_dir(&self, dir: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, dir)?;
         for (path, entry) in st.files.iter_mut() {
             if !is_child_of(path, dir) {
                 continue;
@@ -398,6 +425,7 @@ impl Storage for SimFs {
 
     fn rename(&self, from: &Path, to: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, from)?;
         let inode_id = st
             .files
             .get(from)
@@ -416,6 +444,7 @@ impl Storage for SimFs {
 
     fn delete(&self, path: &Path) -> StorageResult<()> {
         let mut st = self.state.lock().expect("simfs poisoned");
+        Self::check_live(&st, path)?;
         {
             let entry = st
                 .files

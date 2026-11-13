@@ -1,0 +1,28 @@
+# host: Apple M3 Max (14 cores), macOS 27, rustc 1.94.1, release build, internal SSD
+# command: accretion-bench fill-random --engine accretion --durability osbuffered --keys 200000 --concurrency C --memtable-bytes 262144 [--background-compaction]
+# fresh directory per run; small memtable so the 200k-key fill triggers many flushes and compactions
+
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=1 memtable=262144B background_compaction=false seed=24301 dir=/private/tmp/claude-501/rbuild/acc.nFu3
+fill-random  accretion-db/OsBuffered      c=1   ops=200000      11.48s      17415 ops/s  min=   15.3us mean=    57.3us p50=    21.0us p99=    51.9us max= 760150.5us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=1 memtable=262144B background_compaction=true seed=24301 dir=/private/tmp/claude-501/rbuild/acc.AX1I
+fill-random  accretion-db/OsBuffered      c=1   ops=200000       9.25s      21611 ops/s  min=   15.3us mean=    46.2us p50=    21.4us p99=    63.4us max= 222760.7us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=1 memtable=262144B background_compaction=false seed=24301 dir=/private/tmp/claude-501/rbuild/acc.1NZZ
+fill-random  accretion-db/OsBuffered      c=1   ops=200000      12.05s      16596 ops/s  min=   15.4us mean=    60.2us p50=    22.7us p99=    49.2us max= 732914.3us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=1 memtable=262144B background_compaction=true seed=24301 dir=/private/tmp/claude-501/rbuild/acc.PyqP
+fill-random  accretion-db/OsBuffered      c=1   ops=200000      10.30s      19427 ops/s  min=   14.7us mean=    51.4us p50=    23.7us p99=    51.2us max= 155540.2us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=1 memtable=262144B background_compaction=false seed=24301 dir=/private/tmp/claude-501/rbuild/acc.SnHt
+fill-random  accretion-db/OsBuffered      c=1   ops=200000      12.15s      16463 ops/s  min=   15.5us mean=    60.7us p50=    22.9us p99=    46.5us max= 820089.6us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=1 memtable=262144B background_compaction=true seed=24301 dir=/private/tmp/claude-501/rbuild/acc.Ym7E
+fill-random  accretion-db/OsBuffered      c=1   ops=200000      10.59s      18884 ops/s  min=   15.3us mean=    52.9us p50=    23.0us p99=    68.9us max= 208242.3us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=8 memtable=262144B background_compaction=false seed=24301 dir=/private/tmp/claude-501/rbuild/acc.o7bg
+fill-random  accretion-db/OsBuffered      c=8   ops=200000      20.60s       9707 ops/s  min=   17.3us mean=   753.4us p50=    92.8us p99=   327.4us max=2420285.2us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=8 memtable=262144B background_compaction=true seed=24301 dir=/private/tmp/claude-501/rbuild/acc.7Hc0
+fill-random  accretion-db/OsBuffered      c=8   ops=200000      18.34s      10906 ops/s  min=   16.9us mean=   638.2us p50=    89.3us p99=   416.3us max=2807772.8us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=8 memtable=262144B background_compaction=false seed=24301 dir=/private/tmp/claude-501/rbuild/acc.5pu9
+fill-random  accretion-db/OsBuffered      c=8   ops=200000      20.34s       9831 ops/s  min=   15.9us mean=   764.4us p50=    89.4us p99=   305.6us max=4405596.2us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=8 memtable=262144B background_compaction=true seed=24301 dir=/private/tmp/claude-501/rbuild/acc.qN1y
+fill-random  accretion-db/OsBuffered      c=8   ops=200000      17.86s      11201 ops/s  min=   17.2us mean=   660.0us p50=    92.2us p99=   416.7us max=2448412.3us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=8 memtable=262144B background_compaction=false seed=24301 dir=/private/tmp/claude-501/rbuild/acc.0sVn
+fill-random  accretion-db/OsBuffered      c=8   ops=200000      20.71s       9656 ops/s  min=   16.2us mean=   803.5us p50=    93.8us p99=   321.2us max=2865676.5us
+# accretion-bench engine=Accretion durability=OsBuffered keys=200000 reads=200000 concurrency=8 memtable=262144B background_compaction=true seed=24301 dir=/private/tmp/claude-501/rbuild/acc.iCSY
+fill-random  accretion-db/OsBuffered      c=8   ops=200000      18.00s      11112 ops/s  min=   15.9us mean=   643.3us p50=    92.2us p99=   410.5us max=3012090.0us

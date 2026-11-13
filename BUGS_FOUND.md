@@ -227,6 +227,49 @@ reading.
 always lost, never kept), recorded under the README's "not modelled" boundary
 rather than changing the simulator in the same commit.
 
+### 7. Table GC deleted a table another thread was still writing (background compaction, pre-merge)
+
+**Found by:** `tests/engine.rs::background_compaction_with_concurrent_writers_matches_model`,
+written alongside background compaction and run before that change was ever
+committed. The compactor failed with
+`BackgroundCompaction("... not found: /db/00000000000000000351.sst")`.
+
+**Root cause:** GC computed the set of live table ids under the manifest lock,
+released it, then listed the directory and deleted every `*.sst` not in that
+set. With compaction on its own thread, a flush could allocate a new id and
+create its table file in that gap; the stale set did not name it, so GC deleted
+the file the flush was writing (and a flush's GC could do the same to a
+compaction output). Inline compaction never had two writers, so the window
+could not be hit before.
+
+**Fix:** table ids handed out but not yet installed are tracked as *pending*
+and count as live; and GC records the id allocator's position in the same
+critical section as the live set and only deletes files whose id is below it,
+so an id allocated after the snapshot is never touched. The open-time GC from
+#6 still deletes every unreferenced table, since nothing can allocate then.
+With the bound removed, the concurrency test failed 29 of 30 runs; with it, 100
+of 100 passed.
+
+### 8. `CrashInjector` let a second thread act after the simulated power loss
+
+**Found by:** the background-compaction crash sweep
+(`tests/crash.rs::background_compaction`), which intermittently (1 of 3 runs)
+reported an acknowledged `Always` write missing after recovery.
+
+**Root cause:** a harness defect, not an engine one. `CrashInjector` checked
+its `halted` flag, performed the operation, and only then noticed that the
+operation had fired the armed crash. A second thread (the compactor) could pass
+the check between those steps and run a mutation — for example a GC delete —
+against the already-crashed image, producing a state no real power loss can
+produce. Single-threaded workloads, which every earlier sweep used, cannot
+interleave there.
+
+**Fix:** `SimFs` itself now halts when an armed crash fires: the crash and the
+halt happen under its state lock, and every later mutation fails until
+`SimFs::resume`, which `run_crash` calls before handing the image to the
+verifier. Reverting only that halt made the background sweep fail 6 of 20 runs;
+with it, 20 of 20 pass.
+
 ## Harness validation (positive control)
 
 Bug #2 above was a false-*positive* (the harness reported loss the engine did not
