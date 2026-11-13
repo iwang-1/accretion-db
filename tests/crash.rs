@@ -455,3 +455,128 @@ mod regressions {
         }
     }
 }
+
+/// Crash atomicity of `WriteBatch`: at every crash point, the recovered database must equal the state of
+/// every acknowledged batch, or that state plus the *whole* in-flight batch — never part of a batch.
+mod batches {
+    use super::*;
+    use accretion_db::WriteBatch;
+
+    /// The canonical ops grouped into batches of varying size (1 to 5), so batches straddle memtable
+    /// freezes, flushes, and the compaction the canonical workload triggers.
+    fn canonical_batches() -> Vec<Vec<Op>> {
+        let ops = canonical_ops();
+        let sizes = [3usize, 1, 4, 2, 5];
+        let mut out = Vec::new();
+        let mut i = 0;
+        let mut s = 0;
+        while i < ops.len() {
+            let n = sizes[s % sizes.len()].min(ops.len() - i);
+            out.push(ops[i..i + n].to_vec());
+            i += n;
+            s += 1;
+        }
+        out
+    }
+
+    fn run_batches(
+        fs: Arc<dyn Storage>,
+        mode: Durability,
+        batches: &[Vec<Op>],
+        acked: &AtomicUsize,
+    ) {
+        let db = Db::open_on(fs, Path::new(DIR), opts(mode)).expect("open db");
+        for batch in batches {
+            let mut wb = WriteBatch::new();
+            for op in batch {
+                match op {
+                    Op::Put(k, v) => wb.put(k, v),
+                    Op::Delete(k) => wb.delete(k),
+                };
+            }
+            db.write_batch(&wb).expect("write_batch");
+            acked.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The value of every universe key under `model`.
+    fn project(model: &Model, universe: &[Vec<u8>]) -> Vec<Option<Vec<u8>>> {
+        universe.iter().map(|k| model.get(k).cloned()).collect()
+    }
+
+    fn verify_batches(fs: Arc<dyn Storage>, mode: Durability, batches: &[Vec<Op>], acked: usize) {
+        let db = Db::open_on(fs, Path::new(DIR), opts(mode)).expect("reopen after crash");
+        let all_ops: Vec<Op> = batches.iter().flatten().cloned().collect();
+        let universe = key_universe(&all_ops);
+        let got: Vec<Option<Vec<u8>>> = universe.iter().map(|k| db.get(k).expect("get")).collect();
+
+        let acked_ops: Vec<Op> = batches[..acked].iter().flatten().cloned().collect();
+        let without = project(&model_fold(&acked_ops), &universe);
+        if got == without {
+            return;
+        }
+        if acked < batches.len() {
+            let with_ops: Vec<Op> = batches[..=acked].iter().flatten().cloned().collect();
+            let with = project(&model_fold(&with_ops), &universe);
+            if got == with {
+                return;
+            }
+        }
+        panic!(
+            "mode={mode:?} acked={acked}: recovered state matches neither the acked batches nor \
+             acked + the whole in-flight batch {:?}",
+            batches.get(acked)
+        );
+    }
+
+    fn count_batch_ops(mode: Durability) -> u64 {
+        let sim = Arc::new(SimFs::with_seed(0));
+        let fs: Arc<dyn Storage> = sim.clone();
+        run_batches(fs, mode, &canonical_batches(), &AtomicUsize::new(0));
+        sim.op_count()
+    }
+
+    fn sweep(mode: Durability) -> u64 {
+        let batches = canonical_batches();
+        let n = count_batch_ops(mode);
+        assert!(n > 0, "batch workload issued no storage ops");
+        for i in 1..=n {
+            for &seed in &[1u64, 7, 42, 1234] {
+                let acked = Arc::new(AtomicUsize::new(0));
+                let acked_body = Arc::clone(&acked);
+                let b_body = batches.clone();
+                let b_verify = batches.clone();
+                run_crash(
+                    seed,
+                    i,
+                    move |fs| run_batches(fs, mode, &b_body, &acked_body),
+                    move |fs, _report| {
+                        verify_batches(fs, mode, &b_verify, acked.load(Ordering::SeqCst))
+                    },
+                );
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn always_batches_are_all_or_nothing_at_every_crash_point() {
+        sweep(Durability::Always);
+    }
+
+    #[test]
+    fn group_commit_batches_are_all_or_nothing_at_every_crash_point() {
+        sweep(Durability::GroupCommit);
+    }
+
+    /// Emit the batch sweep's crash-point count for the README. Not an assertion.
+    #[test]
+    fn reports_batch_crash_point_count() {
+        let n = count_batch_ops(Durability::Always);
+        println!(
+            "BATCH-CRASH-SWEEP: {} batches; N={n} distinct crash points; 4 seeds; 2 durable modes; {} total crash executions",
+            canonical_batches().len(),
+            n * 4 * 2
+        );
+    }
+}

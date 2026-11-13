@@ -50,6 +50,27 @@ orders mutations across recovery). `tag` is `1` for a `Put` (followed by
 `value_len` + `value`) or `0` for a `Delete`/tombstone (no value bytes). This
 payload is what the frame's `payload_len`/`crc32` wrap.
 
+### Batch payload (one `WriteBatch`)
+
+A `WriteBatch` of two or more mutations is one payload, and so one frame, with
+`tag` `2`:
+
+```
++----------------+--------+------------+---------------------------------------+
+| first_seq: u64 | tag:u8 | count: u32 | count × ( op:u8 | key_len:u32 | key  |
+|                |  (= 2) |            |   | value_len:u32 | value (Put only) ) |
++----------------+--------+------------+---------------------------------------+
+```
+
+Each op uses the single-mutation body above (`op` is `1` for `Put`, `0` for
+`Delete`); the `i`-th op has sequence number `first_seq + i`, claimed together
+under the write lock so no other write interleaves. Because the batch is one
+frame, the torn-tail rule drops it whole or keeps it whole — that is the entire
+atomicity mechanism. A one-op batch is written as an ordinary single-mutation
+payload, so tag `1`/`0` records are byte-identical to the original format and
+older WALs replay unchanged. The decoder rejects a nested batch tag and any
+bytes after the last declared op.
+
 ## SSTable (`src/sstable/`)
 
 An SSTable is an immutable, sorted run of key/value entries. The file is written

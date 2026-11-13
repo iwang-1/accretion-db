@@ -6,13 +6,16 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An embeddable **LSM-tree storage engine** in Rust (zero `unsafe`) — CRC-framed
-write-ahead log with **group commit**, memtable with atomic freeze/flush,
+write-ahead log with **group commit**, **atomic multi-key write batches**,
+memtable with atomic freeze/flush,
 block-based SSTables with bloom filters and sparse indexes, size-tiered
 compaction, crash recovery. Its headline product is not speed but *evidence*: a
 fault-injecting storage layer that simulates power loss at **every write and
 fsync boundary** and shows the engine recovers **330** deterministic crash
 points (4 deterministic seeds spanning 3 tear modes × 2 durable modes = **2,640 executions**) plus **160**
-property-based crash schedules with **zero acknowledged-write loss** — and it is
+property-based crash schedules with **zero acknowledged-write loss**, and that
+every `WriteBatch` is **all-or-nothing** across another **182** crash points
+(**1,456 executions**) — and it is
 benchmarked honestly against [sled](https://github.com/spacejam/sled),
 publishing the comparisons sled *wins*.
 
@@ -97,6 +100,11 @@ fn main() -> Result<(), accretion_db::DbError> {
     db.delete(b"key")?;
     assert_eq!(db.get(b"key")?, None);
 
+    // A WriteBatch is logged as one WAL frame: after a crash, all of it or none of it.
+    let mut batch = accretion_db::WriteBatch::new();
+    batch.put(b"from", b"90").put(b"to", b"110").delete(b"pending");
+    db.write_batch(&batch)?;
+
     // Range scan yields sorted (key, value) pairs, tombstone-aware:
     for (k, v) in db.scan(b"a".to_vec()..b"z".to_vec())? {
         println!("{:?} => {:?}", k, v);
@@ -108,12 +116,13 @@ fn main() -> Result<(), accretion_db::DbError> {
 Run the crash sweep and the benchmarks yourself:
 
 ```sh
-# Headline guarantee: every acked write survives every crash point
-# (all 8 crash tests; well under a second on the disclosed host).
+# Headline guarantee: every acked write survives every crash point, and every
+# write batch is all-or-nothing (all 11 crash tests; well under a second on the
+# disclosed host).
 cargo test --release --test crash
 
-# Distinct-crash-point count (prints N=330 …):
-cargo test --release --test crash reports_crash_point_count -- --nocapture
+# Distinct-crash-point counts (prints N=330 … and N=182 …):
+cargo test --release --test crash reports_ -- --nocapture
 
 # Full benchmark matrix (regenerates benchmarks/raw/*, ~30 min):
 cargo build --release --features bench-sled --bins
@@ -182,11 +191,15 @@ The invariant, enforced everywhere: **zero acknowledged-write loss**. Every
 is present with its exact value after recovery; an in-flight op is either fully
 applied or fully absent; there are no phantom keys, acked deletes hold, the
 manifest references only checksum-valid files that exist, and the WAL tail
-truncates cleanly. Three independent layers test it:
+truncates cleanly. For a `WriteBatch` the in-flight unit is the whole batch:
+the recovered key space must equal the acked batches exactly, or the acked
+batches plus every op of the in-flight one — never a subset. Four independent
+layers test it:
 
 | layer | what it does | count |
 |---|---|---:|
 | Exhaustive deterministic sweep | Run a canonical mixed workload once to count `N` mutating storage ops; for each `i in 1..=N`, fresh `SimFs`, crash after op `i` (× 4 fixed seeds spanning 3 possible tear modes × 2 durable modes), reopen, verify against the acked-prefix model. | **330 points → 2,640 executions** |
+| Batch atomicity sweep | The canonical workload grouped into 14 `WriteBatch`es of 1–5 ops (so batches straddle memtable freezes, flushes, and compaction); the same crash-after-every-op × 4 seeds × 2 modes sweep, but the verifier compares the *entire* recovered key space against the two allowed whole-batch states. Mutation-checked: logging each op of a batch as its own WAL frame makes both sweeps fail on the first batch. | **182 points → 1,456 executions** |
 | Property-based schedules | proptest generates random op sequences × crash indices × durability modes, shrinking failures to minimal counterexamples; 3 named fixed-seed regressions pin the highest-risk shapes, and each one sweeps *every* crash point of its own workload × 4 seeds × 2 modes rather than running a single case. | **160 schedules + 3 regression sweeps** |
 | Real process kill | `accretion-crashtest` writes to a real `RealFs` DB in `Always`, prints each key only once its `put` returns durable; the parent sends `SIGKILL`, reopens against real filesystem calls, and confirms every acknowledged key is present *with its exact value*. The repeated test kills and reopens the **same directory** three times and, after the last round, re-verifies every key acked in *any* round — so recovery must hold across successive abrupt deaths. The kernel and page cache remain alive, so this tests abrupt process death, not hardware power loss or torn writes. | **1 single kill + 3 repeated rounds on one directory; ≥8 acked writes required per round; exact-value check; key counts vary with timing** |
 
@@ -262,8 +275,10 @@ Stated plainly, each on purpose:
 - **Size-tiered only.** Lower write amplification and simpler invariants, at the
   cost of higher space/read amplification — the honest tiered-vs-leveled tradeoff
   (DESIGN_NOTES.md). No leveled compaction.
-- **No transactions, MVCC, or column families.** A single-key durable KV store
-  with range scans; no multi-key atomicity beyond a single `put`.
+- **No transactions, MVCC, or column families.** `WriteBatch` gives multi-key
+  *crash* atomicity, not isolation: there are no snapshots, so a concurrent
+  reader can observe a batch while it is being applied to the memtable, and there
+  is no read-modify-write or conflict detection.
 - **No block cache / compression / `mmap` / `io_uring`.** Leans on the OS page
   cache by design; the point is the crash evidence, not squeezing the I/O path.
 - **`scan` does not seek the sparse index.** `get` uses the bloom filter and

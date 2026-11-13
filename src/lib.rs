@@ -13,6 +13,6 @@ pub mod storage;
 pub mod testkit;
 pub mod wal;
 
-pub use db::{Db, DbError, Options, Scan};
+pub use db::{Db, DbError, Options, Scan, WriteBatch};
 pub use storage::{RealFs, SimFs, Storage, StorageError, StorageResult};
 pub use wal::Durability;

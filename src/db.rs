@@ -90,6 +90,49 @@ impl From<CompactionError> for DbError {
 /// Result alias for engine operations.
 pub type Result<T> = std::result::Result<T, DbError>;
 
+/// A group of puts and deletes applied by [`Db::write_batch`] as one unit.
+///
+/// The whole batch is logged as a single WAL frame, so after a crash either every mutation in it is
+/// recovered or none is. Mutations apply in the order they were added: a later `put` or `delete` of
+/// the same key wins.
+///
+/// The guarantee is crash atomicity, not isolation: the engine has no snapshots, so a concurrent
+/// reader can observe a batch while it is being applied to the memtable.
+#[derive(Debug, Default, Clone)]
+pub struct WriteBatch {
+    ops: Vec<(Vec<u8>, ValueKind)>,
+}
+
+impl WriteBatch {
+    /// An empty batch.
+    pub fn new() -> Self {
+        WriteBatch::default()
+    }
+
+    /// Add an insert-or-overwrite of `key`.
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> &mut Self {
+        self.ops
+            .push((key.to_vec(), ValueKind::Value(value.to_vec())));
+        self
+    }
+
+    /// Add a deletion of `key`.
+    pub fn delete(&mut self, key: &[u8]) -> &mut Self {
+        self.ops.push((key.to_vec(), ValueKind::Tombstone));
+        self
+    }
+
+    /// Number of mutations in the batch.
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// Whether the batch holds no mutations.
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+}
+
 /// Write-path state guarded by the single-writer mutex. Kept behind its own lock so reads never contend
 /// with it.
 #[derive(Debug)]
@@ -157,9 +200,10 @@ impl Db {
         let (wal, recovered) = Wal::open(Arc::clone(&storage), dir, wal_opts)?;
         let memtables = MemtableSet::new(options.memtable_size);
         for record in &recovered.records {
-            let rec = decode_record(record)?;
-            next_seq = next_seq.max(rec.seq + 1);
-            memtables.insert_if_newer(rec.key, rec.value);
+            for rec in decode_record(record)? {
+                next_seq = next_seq.max(rec.seq + 1);
+                memtables.insert_if_newer(rec.key, rec.value);
+            }
         }
 
         Ok(Db {
@@ -182,19 +226,32 @@ impl Db {
     /// Insert or overwrite `key` with `value`. Returns only once the configured
     /// durability contract is met.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.write(key, ValueKind::Value(value.to_vec()))
+        self.write(&[(key.to_vec(), ValueKind::Value(value.to_vec()))])
     }
 
     /// Delete `key` (writing a tombstone). Returns only once the configured
     /// durability contract is met.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.write(key, ValueKind::Tombstone)
+        self.write(&[(key.to_vec(), ValueKind::Tombstone)])
     }
 
-    /// The shared write path for `put` and `delete`.
-    fn write(&self, key: &[u8], kind: ValueKind) -> Result<()> {
-        // Phase 1: claim a seq under the lock, then release it before the append.
-        let seq = {
+    /// Apply every mutation in `batch` atomically with respect to crashes: after recovery, either all
+    /// of them are present or none is. Returns only once the configured durability contract is met
+    /// for the whole batch. An empty batch is a no-op.
+    pub fn write_batch(&self, batch: &WriteBatch) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        self.write(&batch.ops)
+    }
+
+    /// The shared write path for `put`, `delete`, and `write_batch`. `ops` is non-empty and receives
+    /// consecutive sequence numbers in order.
+    fn write(&self, ops: &[(Vec<u8>, ValueKind)]) -> Result<()> {
+        debug_assert!(!ops.is_empty());
+        let count = ops.len() as u64;
+        // Phase 1: claim the seqs under the lock, then release it before the append.
+        let first_seq = {
             let mut ws = self.write.lock().expect("db write lock poisoned");
             while ws.flush_pending {
                 ws = self
@@ -203,14 +260,19 @@ impl Db {
                     .expect("db write lock poisoned during flush wait");
             }
             let seq = ws.next_seq;
-            ws.next_seq = seq + 1;
+            ws.next_seq = seq + count;
             ws.in_flight += 1;
             seq
         };
 
         // Phase 2: durably log the record with the lock released. On error, undo
-        // the in-flight mark so a waiting flush can still make progress.
-        let record = encode_record(seq, key, &kind);
+        // the in-flight mark so a waiting flush can still make progress. A single
+        // mutation keeps the original one-op record format; a batch is one record,
+        // so the WAL's per-frame CRC makes it all-or-nothing on recovery.
+        let record = match ops {
+            [(key, kind)] => encode_record(first_seq, key, kind),
+            _ => encode_batch(first_seq, ops),
+        };
         if let Err(e) = self.wal.append(&record) {
             let mut ws = self.write.lock().expect("db write lock poisoned");
             ws.in_flight -= 1;
@@ -220,8 +282,15 @@ impl Db {
 
         // Phase 3: the record is durable — apply to the memtable and re-take the
         // lock to clear the in-flight mark and possibly flush.
-        self.memtables
-            .insert_if_newer(key.to_vec(), InternalValue { seq, kind });
+        for (i, (key, kind)) in ops.iter().enumerate() {
+            self.memtables.insert_if_newer(
+                key.clone(),
+                InternalValue {
+                    seq: first_seq + i as u64,
+                    kind: kind.clone(),
+                },
+            );
+        }
         let mut ws = self.write.lock().expect("db write lock poisoned");
         ws.in_flight -= 1;
         self.quiesced.notify_all();
@@ -428,11 +497,15 @@ fn range_contains<R: RangeBounds<Vec<u8>>>(range: &R, key: &[u8]) -> bool {
     after_start && before_end
 }
 
-// WAL record codec A WAL payload is one logical mutation: [seq u64][tag u8]([klen u32][key])([vlen
-// u32][value] iff tag == put) The WAL frames this with its own length + CRC; here we only encode the fields.
+// WAL record codec. A WAL payload is either one logical mutation:
+//   [seq u64][tag u8 = put|delete][klen u32][key]([vlen u32][value] iff put)
+// or a batch of them, which recovery applies all-or-nothing because it is one frame:
+//   [first_seq u64][tag u8 = batch][count u32] then `count` times [op u8 = put|delete][klen u32][key]([vlen u32][value] iff put)
+// The i-th op of a batch has seq first_seq + i. The WAL frames this with its own length + CRC.
 
 const REC_TAG_DELETE: u8 = 0;
 const REC_TAG_PUT: u8 = 1;
+const REC_TAG_BATCH: u8 = 2;
 
 /// One decoded WAL record.
 struct Record {
@@ -461,7 +534,43 @@ fn encode_record(seq: Seq, key: &[u8], kind: &ValueKind) -> Vec<u8> {
     buf
 }
 
-fn decode_record(buf: &[u8]) -> Result<Record> {
+fn encode_batch(first_seq: Seq, ops: &[(Vec<u8>, ValueKind)]) -> Vec<u8> {
+    let body: usize = ops
+        .iter()
+        .map(|(k, kind)| {
+            1 + 4
+                + k.len()
+                + match kind {
+                    ValueKind::Value(v) => 4 + v.len(),
+                    ValueKind::Tombstone => 0,
+                }
+        })
+        .sum();
+    let mut buf = Vec::with_capacity(8 + 1 + 4 + body);
+    buf.extend_from_slice(&first_seq.to_le_bytes());
+    buf.push(REC_TAG_BATCH);
+    buf.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+    for (key, kind) in ops {
+        match kind {
+            ValueKind::Value(v) => {
+                buf.push(REC_TAG_PUT);
+                buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                buf.extend_from_slice(key);
+                buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                buf.extend_from_slice(v);
+            }
+            ValueKind::Tombstone => {
+                buf.push(REC_TAG_DELETE);
+                buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                buf.extend_from_slice(key);
+            }
+        }
+    }
+    buf
+}
+
+/// Decode one WAL payload into the mutations it carries, in seq order.
+fn decode_record(buf: &[u8]) -> Result<Vec<Record>> {
     let corrupt = |m: &str| DbError::SsTable(SsTableError::Corrupt(format!("wal record: {m}")));
     let mut pos = 0usize;
     let take = |pos: &mut usize, n: usize| -> Result<&[u8]> {
@@ -474,24 +583,44 @@ fn decode_record(buf: &[u8]) -> Result<Record> {
         *pos += n;
         Ok(out)
     };
+    // One [tag][klen][key]([vlen][value]) mutation body, shared by both payload shapes.
+    let op = |pos: &mut usize, tag: u8, seq: Seq| -> Result<Record> {
+        let klen = u32::from_le_bytes(take(pos, 4)?.try_into().expect("4")) as usize;
+        let key = take(pos, klen)?.to_vec();
+        let kind = match tag {
+            REC_TAG_PUT => {
+                let vlen = u32::from_le_bytes(take(pos, 4)?.try_into().expect("4")) as usize;
+                ValueKind::Value(take(pos, vlen)?.to_vec())
+            }
+            REC_TAG_DELETE => ValueKind::Tombstone,
+            other => return Err(corrupt(&format!("unknown tag {other}"))),
+        };
+        Ok(Record {
+            seq,
+            key,
+            value: InternalValue { seq, kind },
+        })
+    };
     let seq = u64::from_le_bytes(take(&mut pos, 8)?.try_into().expect("8"));
     let tag = take(&mut pos, 1)?[0];
-    let klen = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
-    let key = take(&mut pos, klen)?.to_vec();
-    let kind = match tag {
-        REC_TAG_PUT => {
-            let vlen = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as usize;
-            let value = take(&mut pos, vlen)?.to_vec();
-            ValueKind::Value(value)
+    let records = if tag == REC_TAG_BATCH {
+        let count = u32::from_le_bytes(take(&mut pos, 4)?.try_into().expect("4")) as u64;
+        let mut records = Vec::new();
+        for i in 0..count {
+            let op_tag = take(&mut pos, 1)?[0];
+            if op_tag == REC_TAG_BATCH {
+                return Err(corrupt("nested batch"));
+            }
+            records.push(op(&mut pos, op_tag, seq + i)?);
         }
-        REC_TAG_DELETE => ValueKind::Tombstone,
-        other => return Err(corrupt(&format!("unknown tag {other}"))),
+        records
+    } else {
+        vec![op(&mut pos, tag, seq)?]
     };
-    Ok(Record {
-        seq,
-        key,
-        value: InternalValue { seq, kind },
-    })
+    if pos != buf.len() {
+        return Err(corrupt("trailing bytes"));
+    }
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -547,5 +676,61 @@ mod tests {
                 "replay order overrode sequence order in {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn batch_record_roundtrips_with_consecutive_seqs() {
+        let ops = vec![
+            (b"a".to_vec(), ValueKind::Value(b"1".to_vec())),
+            (b"b".to_vec(), ValueKind::Tombstone),
+            (b"a".to_vec(), ValueKind::Value(Vec::new())),
+        ];
+        let recs = decode_record(&encode_batch(40, &ops)).expect("decode batch");
+        assert_eq!(recs.len(), 3);
+        for (i, (rec, (key, kind))) in recs.iter().zip(&ops).enumerate() {
+            assert_eq!(rec.seq, 40 + i as u64);
+            assert_eq!(&rec.key, key);
+            assert_eq!(&rec.value.kind, kind);
+            assert_eq!(rec.value.seq, rec.seq);
+        }
+    }
+
+    #[test]
+    fn single_op_record_format_is_unchanged() {
+        // Existing WALs hold one-op records; a single put must still encode to exactly that layout.
+        let rec = encode_record(7, b"k", &ValueKind::Value(b"v".to_vec()));
+        let mut expected = 7u64.to_le_bytes().to_vec();
+        expected.push(REC_TAG_PUT);
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(b"k");
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(b"v");
+        assert_eq!(rec, expected);
+        let recs = decode_record(&rec).expect("decode single");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].seq, 7);
+    }
+
+    #[test]
+    fn malformed_batch_records_are_rejected() {
+        let ops = vec![(b"key".to_vec(), ValueKind::Value(b"value".to_vec()))];
+        let good = encode_batch(1, &ops);
+        // Truncated anywhere inside the body.
+        for cut in 9..good.len() {
+            assert!(
+                decode_record(&good[..cut]).is_err(),
+                "accepted truncation at {cut}"
+            );
+        }
+        // Trailing garbage after the declared ops.
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(decode_record(&trailing).is_err());
+        // A batch nested inside a batch.
+        let mut nested = 1u64.to_le_bytes().to_vec();
+        nested.push(REC_TAG_BATCH);
+        nested.extend_from_slice(&1u32.to_le_bytes());
+        nested.push(REC_TAG_BATCH);
+        assert!(decode_record(&nested).is_err());
     }
 }

@@ -212,3 +212,71 @@ fn realfs_smoke_roundtrip_and_reopen() {
     }
     assert_eq!(db2.get(b"late").unwrap(), Some(b"buffered".to_vec()));
 }
+
+// ---- WriteBatch ----
+
+use accretion_db::WriteBatch;
+
+#[test]
+fn write_batch_applies_every_op_in_order() {
+    let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(11));
+    let db = open_sim(fs, small_opts(Durability::Always));
+    db.put(b"stale", b"old").unwrap();
+    let mut batch = WriteBatch::new();
+    batch
+        .put(b"a", b"1")
+        .put(b"b", b"2")
+        .delete(b"stale")
+        .put(b"a", b"3"); // a later op on the same key wins
+    db.write_batch(&batch).unwrap();
+    assert_eq!(db.get(b"a").unwrap(), Some(b"3".to_vec()));
+    assert_eq!(db.get(b"b").unwrap(), Some(b"2".to_vec()));
+    assert_eq!(db.get(b"stale").unwrap(), None);
+}
+
+#[test]
+fn empty_write_batch_is_a_noop() {
+    let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(12));
+    let db = open_sim(fs, small_opts(Durability::Always));
+    db.write_batch(&WriteBatch::new()).unwrap();
+    assert_eq!(db.scan(..).unwrap().count(), 0);
+}
+
+#[test]
+fn write_batch_survives_reopen_from_wal() {
+    for mode in [Durability::Always, Durability::GroupCommit] {
+        let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(13));
+        {
+            let db = open_sim(Arc::clone(&fs), small_opts(mode));
+            let mut batch = WriteBatch::new();
+            batch.put(b"x", b"1").put(b"y", b"2").delete(b"x");
+            db.write_batch(&batch).unwrap();
+        }
+        let db = open_sim(fs, small_opts(mode));
+        assert_eq!(db.get(b"x").unwrap(), None, "{mode:?}");
+        assert_eq!(db.get(b"y").unwrap(), Some(b"2".to_vec()), "{mode:?}");
+    }
+}
+
+#[test]
+fn write_batch_larger_than_memtable_flushes_and_reads_back() {
+    let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(14));
+    let db = open_sim(Arc::clone(&fs), small_opts(Durability::Always));
+    let mut batch = WriteBatch::new();
+    for i in 0..64u32 {
+        batch.put(format!("k{i:03}").as_bytes(), format!("v{i:03}").as_bytes());
+    }
+    db.write_batch(&batch).unwrap();
+    // Single puts after the batch must get sequence numbers above every batch op.
+    db.put(b"k000", b"after").unwrap();
+    db.flush().unwrap();
+    drop(db);
+    let db = open_sim(fs, small_opts(Durability::Always));
+    assert_eq!(db.get(b"k000").unwrap(), Some(b"after".to_vec()));
+    for i in 1..64u32 {
+        assert_eq!(
+            db.get(format!("k{i:03}").as_bytes()).unwrap(),
+            Some(format!("v{i:03}").into_bytes())
+        );
+    }
+}
