@@ -214,14 +214,18 @@ rename/create/delete that reverts to the last `sync_dir`-durable directory image
 deterministic, seeded replay so a failing schedule reproduces byte-for-byte.
 
 **Not modelled** (honest boundaries): cross-file sector reordering, sub-byte
-partial-sector atomicity, or media decay of already-durable data. The engine is
+partial-sector atomicity, media decay of already-durable data, or an unsynced
+create that a real filesystem happens to *keep* (`SimFs` always reverts it;
+BUGS_FOUND.md #6 covers the one engine path where that matters with a
+dedicated regression). The engine is
 only ever permitted to depend on the guarantees this model makes.
 
 See [BUGS_FOUND.md](BUGS_FOUND.md) for the organic crash-bug journal — including
 a tombstone-resurrection bug the BTreeMap-model property test shrank to a
 four-op counterexample, a `SimFs` rename-durability fidelity fix, a group-commit
 locking bug the throughput harness surfaced, an out-of-order WAL recovery bug,
-and inode-generation/tear-order defects found by independent review. A labelled
+inode-generation/tear-order defects found by independent review, and an orphan
+table file that made the engine unwritable after recovery on a real filesystem. A labelled
 positive control deletes one `fsync` to show the sweep actually catches loss.
 
 ## Benchmarks vs sled — wins *and* losses

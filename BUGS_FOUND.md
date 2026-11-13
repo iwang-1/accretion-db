@@ -195,6 +195,38 @@ are release blockers because the simulator's fidelity determines what the crash
 campaign can legitimately claim. The model remains intentionally bounded and
 does not claim to enumerate every filesystem or hardware failure outcome.
 
+### 6. An orphan table file left by a crash made the engine unwritable after recovery
+
+**Found by:** reviewing table-id allocation while planning background compaction.
+A flush writes and syncs an SSTable under `next_table_id`, then installs a
+manifest naming it. `SsTableBuilder::new` refuses to create a file that already
+exists, and the next id comes from the last installed manifest.
+
+**Root cause:** a crash after the table file is written but before the manifest
+install leaves that file unreferenced, under exactly the id the recovered
+manifest hands out next. `SimFs` never produced this state: it reverts every
+create that was not followed by `sync_dir`, and the manifest install's
+`sync_dir` is what would have made the table's entry durable. A real filesystem
+gives no such guarantee — ext4's journal can commit the directory entry on its
+own schedule — so the orphan can survive. The exhaustive sweep also missed it
+because its verifier only reads after recovery; the failure appears on the
+first flush after reopening, which fails with
+`Compaction(SsTable(Storage(AlreadyExists(...))))`, as does every later flush.
+
+**Fix:** `Manifest::open` now runs the existing table GC once, deleting every
+`*.sst` the recovered manifest does not name (nothing can reference such a file
+at open). Regressions in `tests/crash.rs`:
+`orphan_table_after_crash::orphan_table_file_does_not_block_later_flushes`
+plants the orphan a real filesystem could leave, reopens, and requires 40 more
+writes and a flush to succeed (it failed with the error above before the fix);
+`writable_after_recovery` re-runs the exhaustive crash sweep in both durable
+modes, but writes 40 keys and flushes after each recovery instead of only
+reading.
+
+**Model note:** this is a gap in what `SimFs` models (an unsynced create is
+always lost, never kept), recorded under the README's "not modelled" boundary
+rather than changing the simulator in the same commit.
+
 ## Harness validation (positive control)
 
 Bug #2 above was a false-*positive* (the harness reported loss the engine did not

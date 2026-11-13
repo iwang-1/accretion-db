@@ -580,3 +580,104 @@ mod batches {
         );
     }
 }
+
+/// Recovery must leave the engine writable, not just readable: after a crash at any point, reopening
+/// and writing enough to flush and compact again must succeed. (A crash between writing a table file and
+/// installing the manifest that names it leaves an orphan file under an id the recovered manifest will
+/// hand out again.)
+mod writable_after_recovery {
+    use super::*;
+
+    fn write_more(fs: Arc<dyn Storage>, mode: Durability) {
+        let db = Db::open_on(fs, Path::new(DIR), opts(mode)).expect("reopen after crash");
+        for i in 0..40u32 {
+            db.put(
+                format!("post{i:02}").as_bytes(),
+                format!("after-crash-{i:02}").as_bytes(),
+            )
+            .unwrap_or_else(|e| panic!("put {i} after recovery failed: {e}"));
+        }
+        db.flush().expect("flush after recovery");
+        for i in 0..40u32 {
+            assert_eq!(
+                db.get(format!("post{i:02}").as_bytes()).unwrap(),
+                Some(format!("after-crash-{i:02}").into_bytes())
+            );
+        }
+    }
+
+    fn sweep(mode: Durability) {
+        let ops = canonical_ops();
+        let sim = Arc::new(SimFs::with_seed(0));
+        let fs: Arc<dyn Storage> = sim.clone();
+        run_workload(fs, mode, &ops, &AtomicUsize::new(0));
+        let n = sim.op_count();
+        for i in 1..=n {
+            for &seed in &[1u64, 7, 42, 1234] {
+                let ops_body = ops.clone();
+                run_crash(
+                    seed,
+                    i,
+                    move |fs| run_workload(fs, mode, &ops_body, &AtomicUsize::new(0)),
+                    move |fs, _report| write_more(fs, mode),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn always_engine_is_writable_after_every_crash_point() {
+        sweep(Durability::Always);
+    }
+
+    #[test]
+    fn group_commit_engine_is_writable_after_every_crash_point() {
+        sweep(Durability::GroupCommit);
+    }
+}
+
+/// A real filesystem may persist a file's directory entry without an explicit directory sync (ext4's
+/// journal commits metadata on its own schedule), which `SimFs` does not model: it always reverts an
+/// unsynced create. So a crash after a flush writes and syncs an SSTable but before the manifest names
+/// it can leave that file behind on real hardware, under the id the recovered manifest hands out next.
+mod orphan_table_after_crash {
+    use super::*;
+    use accretion_db::manifest::table_path;
+
+    #[test]
+    fn orphan_table_file_does_not_block_later_flushes() {
+        let sim = Arc::new(SimFs::with_seed(5));
+        let fs: Arc<dyn Storage> = sim.clone();
+        {
+            let db =
+                Db::open_on(Arc::clone(&fs), Path::new(DIR), opts(Durability::Always)).unwrap();
+            for i in 0..20u32 {
+                db.put(format!("k{i:02}").as_bytes(), b"value-before")
+                    .unwrap();
+            }
+            db.flush().unwrap();
+        }
+        // Plant the orphan a crashed flush would leave: a durable file at the next table id.
+        let next_id = {
+            let db =
+                Db::open_on(Arc::clone(&fs), Path::new(DIR), opts(Durability::Always)).unwrap();
+            db.debug_version().next_table_id
+        };
+        let orphan = table_path(Path::new(DIR), next_id);
+        fs.create(&orphan).unwrap();
+        fs.append(&orphan, b"half-written table from before the crash")
+            .unwrap();
+        fs.sync_file(&orphan).unwrap();
+        fs.sync_dir(Path::new(DIR)).unwrap();
+
+        let db = Db::open_on(fs, Path::new(DIR), opts(Durability::Always)).expect("reopen");
+        for i in 0..40u32 {
+            db.put(format!("n{i:02}").as_bytes(), b"value-after")
+                .unwrap();
+        }
+        db.flush()
+            .expect("flush must not trip over the orphan file");
+        assert_eq!(db.get(b"k00").unwrap(), Some(b"value-before".to_vec()));
+        assert_eq!(db.get(b"n39").unwrap(), Some(b"value-after".to_vec()));
+    }
+}

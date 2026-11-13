@@ -192,14 +192,21 @@ impl Manifest {
             write_manifest(&*fs, dir, &v)?;
             v
         };
-        Ok(Manifest {
+        let manifest = Manifest {
             fs,
             dir: dir.to_path_buf(),
             inner: Mutex::new(Inner {
                 current: Arc::new(current),
                 obsolete: Vec::new(),
             }),
-        })
+        };
+        // Reclaim table files the recovered manifest does not name. A crash between writing a table and
+        // installing the manifest that names it can leave such a file on a real filesystem, which may
+        // persist a directory entry without an explicit directory sync. Its id is the one this manifest
+        // hands out next, so left in place it would make the next flush fail with AlreadyExists. Nothing
+        // can reference an unlisted table at open, so deleting it is safe.
+        manifest.gc()?;
+        Ok(manifest)
     }
 
     /// The directory this manifest lives in.
