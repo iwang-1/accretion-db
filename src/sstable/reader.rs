@@ -135,9 +135,26 @@ impl SsTableReader {
 
     /// A forward iterator over every entry in key order.
     pub fn iter(&self) -> SsTableIter<'_> {
+        self.iter_from_block(0)
+    }
+
+    /// A forward iterator in key order that skips, via the sparse index, every data block that ends
+    /// before `start`. It may still yield a few entries below `start` from the first block it loads, so
+    /// callers filter by range; it never skips an entry at or above `start`.
+    pub fn iter_from(&self, start: std::ops::Bound<&[u8]>) -> SsTableIter<'_> {
+        let block = match start {
+            std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k) => {
+                self.find_block(k).unwrap_or(0)
+            }
+            std::ops::Bound::Unbounded => 0,
+        };
+        self.iter_from_block(block)
+    }
+
+    fn iter_from_block(&self, block_idx: usize) -> SsTableIter<'_> {
         SsTableIter {
             reader: self,
-            block_idx: 0,
+            block_idx,
             block: Vec::new(),
             within: 0,
             loaded: false,

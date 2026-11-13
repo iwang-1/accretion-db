@@ -146,8 +146,27 @@ the range. The scan path does **not** seek via the sparse index the way `get`
 does, so per-scan latency is set by the total size of all tables rather than by the
 window width — the 15.6 ms is the cost of decoding the whole 50k-key data set once
 per scan. The ≈31,500 figure is therefore pairs *returned* per second, not pairs
-examined, and it should not be read as a per-pair scan cost. An index-seeking scan
-is future work.
+examined, and it should not be read as a per-pair scan cost.
+
+**Update: index-seeking scans.** `Db::scan` now skips tables whose key range
+misses the window, seeks the sparse index to the block holding the window's
+start, and stops at the window's end (DESIGN_NOTES.md, *Read path*). The same B3
+command, before and after that change, on one host (Apple M3 Max, macOS 27,
+`rustc` 1.94.1; warm page cache as above), 5 runs each, median:
+
+| metric | before | after | change |
+|---|---:|---:|---:|
+| scans/sec | 45 | 3,650 | 81x |
+| per-scan p50 | 22.36 ms | 0.265 ms | 84x lower |
+| per-scan p99 | 24.46 ms | 0.402 ms | 61x lower |
+| pairs returned (1,000 scans) | 500,000 | 500,000 | same |
+
+Raw: [`raw/b3_scan_apple_m3max_before.txt`](raw/b3_scan_apple_m3max_before.txt),
+[`raw/b3_scan_apple_m3max_after.txt`](raw/b3_scan_apple_m3max_after.txt). The
+"before" column is this host's equivalent of the 63 scans/sec row above (a
+different machine, so the two absolute numbers are not comparable to each
+other). Both columns return the same 500 pairs per scan; only the work done to
+find them changed. The B3 row above was not re-run on the original host.
 
 **Bloom filter FPR (measured vs theoretical),** from
 `src/sstable/bloom.rs::measured_fpr_near_theoretical` (n = 10,000 keys, 10

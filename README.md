@@ -76,8 +76,10 @@ memtable insert, the size-triggered freeze, the flush to a tier-0 SSTable, and
 the manifest version bump all happen behind that contract. A `get` walks the
 active memtable, the frozen memtables, then the SSTable tiers newest-first — the
 table's key range and its bloom filter gate each probe, and a sparse index locates
-the one 4 KiB block that could hold the key. (`scan` is correct but takes none of
-those shortcuts — see *Limitations*.) Full walkthrough in
+the one 4 KiB block that could hold the key. A `scan` uses the same table key
+ranges to skip tables, seeks the sparse index to the block holding the range
+start, and stops at the range end, so its cost follows the width of the range.
+Full walkthrough in
 [DESIGN_NOTES.md](DESIGN_NOTES.md); on-disk byte layouts in [FORMAT.md](FORMAT.md).
 
 ## Quickstart
@@ -281,11 +283,9 @@ Stated plainly, each on purpose:
   is no read-modify-write or conflict detection.
 - **No block cache / compression / `mmap` / `io_uring`.** Leans on the OS page
   cache by design; the point is the crash evidence, not squeezing the I/O path.
-- **`scan` does not seek the sparse index.** `get` uses the bloom filter and
-  sparse index to touch one 4 KiB block, but `scan` decodes every block of every
-  table and filters afterwards, so a narrow range costs the same as a full one
-  (RESULTS.md §4). Correct results, unoptimized cost; index-seeking scans are
-  future work.
+- **Scans collect each table's matching entries before merging.** Memory per
+  scan grows with the range width (not the data set); a lazy, streaming merge
+  over table blocks is future work.
 - **Single-host, single-process.** No network protocol, no multi-writer
   coordination. All benchmark numbers are single-host; the read numbers are
   warm-page-cache (no root to drop caches on the build host).

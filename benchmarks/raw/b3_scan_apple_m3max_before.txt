@@ -1,0 +1,8 @@
+# host: Apple M3 Max (14 cores), macOS 27, rustc 1.94.1, release build; warm page cache (same caveat as §4)
+# command (x5, fresh temp dir each): accretion-bench scan --engine accretion --durability osbuffered --keys 50000 --concurrency 1
+# code: ad1f031 (full-table decode per scan)
+scan(≈500000 pairs) accretion-db/OsBuffered      c=1   ops=1000        22.45s         45 ops/s  min=21087.1us mean= 22449.5us p50= 22436.5us p99= 24447.5us max=  26330.6us
+scan(≈500000 pairs) accretion-db/OsBuffered      c=1   ops=1000        22.42s         45 ops/s  min=21051.6us mean= 22416.0us p50= 22355.0us p99= 24464.7us max=  27418.9us
+scan(≈500000 pairs) accretion-db/OsBuffered      c=1   ops=1000        22.61s         44 ops/s  min=20898.0us mean= 22610.9us p50= 22469.5us p99= 24990.9us max=  30820.7us
+scan(≈500000 pairs) accretion-db/OsBuffered      c=1   ops=1000        22.50s         44 ops/s  min=20907.5us mean= 22495.9us p50= 22199.7us p99= 32666.9us max= 114703.9us
+scan(≈500000 pairs) accretion-db/OsBuffered      c=1   ops=1000        22.24s         45 ops/s  min=20896.4us mean= 22235.1us p50= 22219.6us p99= 24005.9us max=  32833.6us

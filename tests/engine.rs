@@ -280,3 +280,107 @@ fn write_batch_larger_than_memtable_flushes_and_reads_back() {
         );
     }
 }
+
+// ---- Index-seeking range scans ----
+
+/// Every bound kind on both ends, against a reference model, over a DB with many SSTables and data
+/// blocks, so a seek can land on a block boundary, inside a block, before the first key, or past the
+/// last one.
+#[test]
+fn scan_matches_model_for_every_bound_kind() {
+    use std::collections::BTreeMap;
+    use std::ops::Bound;
+
+    // Tiny xorshift so the test is deterministic without extra dependencies.
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let key = |n: u64| format!("key{:05}", n % 4000).into_bytes();
+
+    let fs: Arc<dyn Storage> = Arc::new(SimFs::with_seed(21));
+    let opts = Options {
+        durability: Durability::OsBuffered,
+        memtable_size: 16 * 1024, // several tables, each with several 4 KiB blocks
+        tier_fanout: 1000,        // no compaction, so the tables stay separate and overlap
+    };
+    let db = open_sim(fs, opts);
+    let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+    for i in 0..6000u64 {
+        let k = key(next());
+        if next() % 5 == 0 {
+            db.delete(&k).unwrap();
+            model.remove(&k);
+        } else {
+            let v = format!("v{i}").into_bytes();
+            db.put(&k, &v).unwrap();
+            model.insert(k, v);
+        }
+    }
+    db.flush().unwrap();
+    assert!(
+        db.debug_version().num_tiers() >= 1,
+        "expected data in SSTables"
+    );
+
+    let bound = |r: u64, k: Vec<u8>| match r % 3 {
+        0 => Bound::Included(k),
+        1 => Bound::Excluded(k),
+        _ => Bound::Unbounded,
+    };
+    for _ in 0..3000 {
+        // Keys from a slightly wider space than was written, so bounds also fall before the first
+        // key, after the last, and between existing keys.
+        let a = format!("key{:05}", next() % 4100).into_bytes();
+        let b = format!("key{:05}", next() % 4100).into_bytes();
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let range = (bound(next(), lo), bound(next(), hi));
+        if let (Bound::Excluded(l), Bound::Excluded(h)) = (&range.0, &range.1) {
+            if l == h {
+                continue; // BTreeMap::range panics on (Excluded(x), Excluded(x))
+            }
+        }
+        let got: Vec<(Vec<u8>, Vec<u8>)> = db.scan(range.clone()).unwrap().collect();
+        let expected: Vec<(Vec<u8>, Vec<u8>)> = model
+            .range(range.clone())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(got, expected, "scan({range:?})");
+    }
+
+    // Ranges that start or end exactly on a table's boundary keys, which random bounds rarely hit:
+    // these pin the table-skipping check at both edges.
+    let version = db.debug_version();
+    let tables: Vec<_> = version.all_tables().cloned().collect();
+    assert!(
+        tables.len() >= 2,
+        "expected several SSTables, got {}",
+        tables.len()
+    );
+    for t in &tables {
+        for range in [
+            (Bound::Included(t.last_key.clone()), Bound::Unbounded),
+            (Bound::Excluded(t.last_key.clone()), Bound::Unbounded),
+            (Bound::Unbounded, Bound::Included(t.first_key.clone())),
+            (Bound::Unbounded, Bound::Excluded(t.first_key.clone())),
+            (
+                Bound::Included(t.first_key.clone()),
+                Bound::Included(t.first_key.clone()),
+            ),
+            (
+                Bound::Included(t.last_key.clone()),
+                Bound::Included(t.last_key.clone()),
+            ),
+        ] {
+            let got: Vec<(Vec<u8>, Vec<u8>)> = db.scan(range.clone()).unwrap().collect();
+            let expected: Vec<(Vec<u8>, Vec<u8>)> = model
+                .range(range.clone())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            assert_eq!(got, expected, "boundary scan({range:?})");
+        }
+    }
+}

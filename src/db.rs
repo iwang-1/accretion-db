@@ -339,10 +339,19 @@ impl Db {
 
         let version = self.manifest.current();
         for meta in version.all_tables() {
+            // Skip tables whose [first_key, last_key] cannot intersect the range: no file I/O at all.
+            if !table_overlaps(meta, &range) {
+                continue;
+            }
             let reader = self.reader_for(meta)?;
             let mut entries: Vec<(Vec<u8>, InternalValue)> = Vec::new();
-            for entry in reader.iter() {
+            // Seek to the first block that can hold the range start (the sparse index, as `get`
+            // uses), and stop decoding at the first key past the range end.
+            for entry in reader.iter_from(range.start_bound().map(|k| k.as_slice())) {
                 let e = entry?;
+                if past_end(&range, &e.key) {
+                    break;
+                }
                 if range_contains(&range, &e.key) {
                     entries.push((e.key, internal_of(e.seq, e.value)));
                 }
@@ -480,6 +489,25 @@ fn internal_of(seq: Seq, value: Value) -> InternalValue {
             kind: ValueKind::Tombstone,
         },
     }
+}
+
+/// Whether `key` sorts after the range's end, so a key-ordered walk can stop.
+fn past_end<R: RangeBounds<Vec<u8>>>(range: &R, key: &[u8]) -> bool {
+    match range.end_bound() {
+        Bound::Unbounded => false,
+        Bound::Included(e) => key > e.as_slice(),
+        Bound::Excluded(e) => key >= e.as_slice(),
+    }
+}
+
+/// Whether a table holding keys in `[meta.first_key, meta.last_key]` can contain any key in `range`.
+fn table_overlaps<R: RangeBounds<Vec<u8>>>(meta: &TableMeta, range: &R) -> bool {
+    let starts_after_table = match range.start_bound() {
+        Bound::Unbounded => false,
+        Bound::Included(s) => s.as_slice() > meta.last_key.as_slice(),
+        Bound::Excluded(s) => s.as_slice() >= meta.last_key.as_slice(),
+    };
+    !starts_after_table && !past_end(range, &meta.first_key)
 }
 
 /// Whether `range` contains `key`, for any `RangeBounds<Vec<u8>>`.

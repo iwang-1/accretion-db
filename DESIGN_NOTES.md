@@ -71,15 +71,23 @@ is the same set of sources fed into a k-way **merge iterator** (`src/iter/`) tha
 yields keys in order, newest-wins per key, dropping tombstoned keys — verified
 against a `BTreeMap` reference model.
 
-**Scan does not use the sparse index (a known gap).** Unlike `get`, `Db::scan`
-walks each table with `SsTableReader::iter()`, which starts at block 0 and decodes
-every block, filtering entries to the range afterwards. It also does not use the
-per-table `[first_key, last_key]` range to skip non-overlapping tables. So a scan
-costs the whole data set regardless of how narrow the range is — measured in
-RESULTS.md §4, where a 500-key window over 50k keys takes 15.6 ms. Seeking the
-sparse index to the range's start block (and skipping tables out of range) is the
-obvious fix and is future work; the range-scan *semantics* are correct, only the
-cost is not.
+**Scans seek the sparse index.** `Db::scan` first skips every table whose
+`[first_key, last_key]` cannot intersect the range, with no file I/O. For the rest,
+`SsTableReader::iter_from(start)` uses the same sparse-index search as `get` to
+begin at the one block that can hold the range start, and the scan stops decoding
+at the first key past the range end. So a scan's cost follows the width of the
+range rather than the size of the data set. Entries are still collected per table
+before the merge, so a corrupt block surfaces as an error from `scan()` itself, as
+before.
+
+Until this change a scan started every table at block 0 and decoded every block,
+filtering afterwards: a 500-key window over 50k keys cost the whole data set
+(15.6 ms on the disclosed host). RESULTS.md §4 has before/after numbers measured
+on one host. The scan semantics were already correct; the change is to cost only,
+and `tests/engine.rs::scan_matches_model_for_every_bound_kind` pins it: 3,000
+random ranges over all nine combinations of included/excluded/unbounded ends, plus
+ranges that start or end exactly on every table's boundary keys, each compared
+with a `BTreeMap` model over 16 separate SSTables.
 
 ## Group-commit math
 
