@@ -168,6 +168,15 @@ disjoint probes).
 
 ## Crash-consistency harness
 
+To inspect the two failure models independently, run these integration targets from the repository root:
+
+```sh
+cargo test --locked --test crash
+cargo test --locked --test process_kill   # Unix
+```
+
+The [simulated crash suite](tests/crash.rs) controls the storage boundary where a write tears. The [process-death test](tests/process_kill.rs) kills a child using the real filesystem and checks acknowledged values after reopening.
+
 The invariant, enforced everywhere: **zero acknowledged-write loss**. Every
 `put`/`delete` that *returned* under a durable mode (`Always` / `GroupCommit`)
 is present with its exact value after recovery; an in-flight op is either fully
